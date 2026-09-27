@@ -1,0 +1,151 @@
+diff --git a/data/option_chain.py b/data/option_chain.py
+index d69bc7f..49f6c83 100644
+--- a/data/option_chain.py
++++ b/data/option_chain.py
+@@ -157,11 +157,16 @@ def refresh_registry(
+     exchange: str = DEFAULT_EXCHANGE,
+     cache_dir: str = DEFAULT_CACHE_DIR,
+     master: list | None = None,
++    today: date | None = None,
+ ) -> dict:
+     """
+     Aaj ke live contracts registry mein jodta hai (purane kabhi hataye
+     nahi jaate — wahi to expire hone ke baad kaam aate hain).
+ 
++    `today` sirf testing ke liye: `first_seen` wahi din hai jis din contract
++    registry mein pehli baar dikha, isliye usse inject karne se coverage
++    window real ghadi se nahi judti aur tests waqt ke saath nahi sente hain.
++
+     Returns: poori registry {symbol: contract}
+     """
+     path = registry_path(underlying, exchange, cache_dir)
+@@ -171,16 +176,16 @@ def refresh_registry(
+         underlying, exchange,
+     )
+ 
+-    today = now_ist().date().isoformat()
++    stamp = (today if today is not None else now_ist().date()).isoformat()
+     added = 0
+     for symbol, contract in live.items():
+         if symbol not in registry:
+-            contract["first_seen"] = today
++            contract["first_seen"] = stamp
+             registry[symbol] = contract
+             added += 1
+         else:
+             registry[symbol].update(contract)
+-        registry[symbol]["last_seen"] = today
++        registry[symbol]["last_seen"] = stamp
+ 
+     save_registry(registry, path)
+     logger.info(
+diff --git a/tests/test_intraday.py b/tests/test_intraday.py
+index 3cdb70b..f3bba52 100644
+--- a/tests/test_intraday.py
++++ b/tests/test_intraday.py
+@@ -352,6 +352,12 @@ def test_missing_ranges_only_fetches_tail_when_cache_covers_start():
+ 
+ def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
+     """20 din cache karke 60 din maango to purana hissa bhi fetch ho."""
++    # "Aaj" ko pin karna zaroori hai. load_intraday apna window waqt ki
++    # ghadi se banata hai, isliye bina pin ke backfill range har din
++    # chhota hota jaata aur test apni hi date ki wajah se fail hota.
++    monkeypatch.setattr(
++        intraday, "now_ist", lambda: datetime(2026, 9, 7, 15, 30)
++    )
+     save_cache(make_session("2026-08-31"), "NIFTY", "FIVE_MINUTE", str(tmp_path))
+     calls = []
+ 
+@@ -362,7 +368,11 @@ def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
+     monkeypatch.setattr(intraday, "_fetch_from_angel", fake_fetch)
+     load_intraday(interval="FIVE_MINUTE", days=60, cache_dir=str(tmp_path))
+ 
+-    assert len(calls) == 2
++    # 60-din window = 09JUL → 07SEP, cache sirf 31AUG ka hai
++    assert calls == [
++        (datetime(2026, 7, 9), datetime(2026, 9, 1)),   # backfill
++        (datetime(2026, 8, 31), datetime(2026, 9, 7, 15, 30)),  # tail
++    ]
+     assert (calls[0][1] - calls[0][0]).days >= 40
+ 
+ 
+diff --git a/tests/test_option_chain.py b/tests/test_option_chain.py
+index b70e8c3..10eecc6 100644
+--- a/tests/test_option_chain.py
++++ b/tests/test_option_chain.py
+@@ -35,6 +35,12 @@ SAMPLE_MASTER = [
+      "name": "RELIANCE", "instrumenttype": "OPTSTK"},
+ ]
+ 
++# Registry kab bani, ye PIN karna zaroori hai. Agar ye aaj ki ghadi par
++# chhode to `first_seen` aaj ka din ban jaata hai aur neeche ke lookups
++# (07SEP/08SEP) coverage guard se pehle hi reject ho jaate hain — test
++# asli logic se nahi, apni hi date se fail hota hai.
++REGISTRY_DAY = date(2026, 9, 7)
++
+ 
+ # ----------------------- master parsing -----------------------
+ 
+@@ -60,11 +66,15 @@ def test_registry_keeps_contracts_that_have_left_the_master(tmp_path):
+     nahi mil sakta — yahi is layer ka poora point hai.
+     """
+     cache = str(tmp_path)
+-    option_chain.refresh_registry(cache_dir=cache, master=SAMPLE_MASTER)
++    option_chain.refresh_registry(
++        cache_dir=cache, master=SAMPLE_MASTER, today=REGISTRY_DAY
++    )
+ 
+     # agle din 08SEP wala expire ho gaya, master se gayab
+     later = [r for r in SAMPLE_MASTER if not r["symbol"].startswith("NIFTY08SEP")]
+-    registry = option_chain.refresh_registry(cache_dir=cache, master=later)
++    registry = option_chain.refresh_registry(
++        cache_dir=cache, master=later, today=date(2026, 9, 8)
++    )
+ 
+     assert "NIFTY08SEP2620000CE" in registry
+     assert registry["NIFTY08SEP2620000CE"]["token"] == "111"
+@@ -81,7 +91,7 @@ def test_a_far_away_expiry_is_not_used_as_that_days_weekly(tmp_path):
+     expiry uthana ek ALAG contract (zyada DTE) pe P&L banata hai.
+     """
+     registry = option_chain.refresh_registry(
+-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
++        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_DAY
+     )
+     provider = option_chain.AngelOptionChain(
+         cache_dir=str(tmp_path), registry=registry, offline=True
+@@ -98,7 +108,7 @@ def test_a_far_away_expiry_is_not_used_as_that_days_weekly(tmp_path):
+ 
+ def test_nearest_expiry_and_contract_lookup(tmp_path):
+     registry = option_chain.refresh_registry(
+-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
++        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_DAY
+     )
+ 
+     expiry = option_chain.nearest_expiry_on_or_after(
+@@ -115,7 +125,7 @@ def test_nearest_expiry_and_contract_lookup(tmp_path):
+ 
+ def build_provider(monkeypatch, candles: dict, tmp_path):
+     registry = option_chain.refresh_registry(
+-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
++        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_DAY
+     )
+     provider = option_chain.AngelOptionChain(
+         cache_dir=str(tmp_path), registry=registry, offline=True
+@@ -250,7 +260,7 @@ def test_registry_start_se_pehle_ka_din_real_nahi_maana_jaata(tmp_path):
+     par wo ek ALAG contract hai, uska bhaav "real" batana jhooth hoga.
+     """
+     registry = option_chain.refresh_registry(
+-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
++        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_DAY
+     )
+     coverage_start = date(2026, 9, 3)  # 01SEP wali weekly kabhi dekhi hi nahi
+     provider = option_chain.AngelOptionChain(
+@@ -286,7 +296,7 @@ def test_expired_contract_ka_fetch_window_expiry_pe_rukta_hai(monkeypatch, tmp_p
+         return pd.DataFrame()
+ 
+     registry = option_chain.refresh_registry(
+-        cache_dir=str(tmp_path), master=SAMPLE_MASTER
++        cache_dir=str(tmp_path), master=SAMPLE_MASTER, today=REGISTRY_DAY
+     )
+     provider = option_chain.AngelOptionChain(
+         cache_dir=str(tmp_path), registry=registry, offline=True
