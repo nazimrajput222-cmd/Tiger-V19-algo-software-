@@ -1,0 +1,506 @@
+"""
+Tiger Brain V6.2 — Expanded F&O Universe (Intraday)
+=====================================================
+Pure intraday options-buying machine ke liye full high-liquidity F&O
+universe. Daily 5-10 trades per segment target ke liye 50+ stocks +
+index + commodities.
+
+⚠️ HONESTY: yfinance 15-minute data sirf ~60 din ka history deta hai.
+Isliye ye universe sirf un symbols tak limited hai jinka 15m data
+reliably mil raha hai. Real deployment pe Angel One / broker se full
+F&O list aayegi.
+
+Symbol naming convention:
+  - NSE stocks: "<SYMBOL>.NS"
+  - Index: "^NSEI" (NIFTY), "^NSEBANK" (BANKNIFTY)
+  - Commodities (proxy): "CL=F" (CRUDE), "GC=F" (GOLD) — US futures,
+    timezone alag hai, session IST se align hota hai approx.
+"""
+
+from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Exchange-standard lot sizes (approximate — real lots change quarterly)
+LOT_SIZES = {
+    "NIFTY": 75,
+    "BANKNIFTY": 35,
+    "FINNIFTY": 65,
+    # High-liquidity F&O stocks (lot size approximation)
+    "RELIANCE": 250,
+    "SBIN": 300,
+    "HDFCBANK": 550,
+    "ICICIBANK": 700,
+    "AXISBANK": 625,
+    "KOTAKBANK": 400,
+    "TCS": 175,
+    "INFY": 400,
+    "WIPRO": 6000,
+    "HCLTECH": 700,
+    "LT": 175,
+    "MARUTI": 50,
+    "ITC": 3200,
+    "BHARTIARTL": 475,
+    "TATASTEEL": 2100,
+    "SUNPHARMA": 700,
+    "ADANIENT": 200,
+    "TATACONSUM": 800,
+    "BAJFINANCE": 750,
+    "ASIANPAINT": 400,
+    "ULTRACEMCO": 150,
+    "TITAN": 175,
+    "POWERGRID": 3850,
+    "NTPC": 1925,
+    "ONGC": 3850,
+    "COALINDIA": 3200,
+    "TECHM": 600,
+    "DIVISLAB": 150,
+    "CIPLA": 850,
+    "DRREDDY": 125,
+    "GRASIM": 300,
+    "JSWSTEEL": 260,
+    "HINDALCO": 1075,
+    "BAJAJFINSV": 175,
+    "NESTLEIND": 125,
+    "DABUR": 1300,
+    "BRITANNIA": 200,
+    # Expanded universe — additional liquid F&O stock lot sizes
+    "INDUSINDBK": 300, "FEDERALBNK": 3000, "IDFCFIRSTB": 1300,
+    "AUBANK": 1100, "PNB": 14500, "BANKBARODA": 3750,
+    "M&M": 550, "TATAMOTORS": 850, "HEROMOTOCO": 200,
+    "BAJAJ-AUTO": 250, "EICHERMOT": 100, "MOTHERSON": 4400,
+    "BOSCHLTD": 40, "MRF": 10, "INDIGO": 200, "JETAIRWAYS": 1200,
+    "DIXON": 700, "AMBER": 1100, "PIDILITIND": 100, "SIEMENS": 80,
+    "ABB": 50, "GODREJCP": 400, "COLGPALM": 1400, "GAIL": 2400,
+    "PETRONET": 1825, "IGL": 2900, "DLF": 900, "LODHA": 350,
+    "ABCAPITAL": 850, "HDFCLIFE": 750, "SBILIFE": 750,
+    "ICICIPRULI": 700, "ICICIGI": 1400, "LICI": 1200,
+    "PFC": 2750, "RECLTD": 2750, "IRCTC": 320, "NAUKRI": 65,
+    "DMART": 80, "TRENT": 125, "HINDUNILVR": 300,
+    "JSWSTEEL": 260,
+    # Commodities (MCX proxy via US futures)
+    "CRUDEOIL": 100,
+    "NATURALGAS": 1250,
+    "GOLD": 100,
+    "SILVER": 30,
+    # MCX MINI contracts — smaller lot sizes for small capital accounts
+    "GOLDM": 100,           # Gold Mini (100g vs 1kg full)
+    "SILVERM": 1,           # Silver Mini (1kg vs 30kg full)
+    "CRUDEOILM": 10,        # Crude Oil Mini (10 bbl vs 100 full)
+    "NATGASMINI": 250,      # Natural Gas Mini (250 vs 1250 full)
+}
+
+# F&O universe — high-liquidity stocks + index + commodities
+# Segmented for Brain 4's separate commodity counter.
+# This is the comprehensive NSE F&O stock options universe (~60 symbols).
+# The live scanner dynamically selects the top N by Bhavcopy liquidity;
+# this map provides the yfinance ticker for each symbol.
+INDEX_SYMBOLS = {
+    "NIFTY": "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY": "^CNXFIN",  # FinNifty (financial sector index)
+    "SENSEX": "^BSESN",     # BSE Sensex (BSE index)
+}
+
+STOCK_SYMBOLS = {
+    # Banks + financials
+    "RELIANCE": "RELIANCE.NS", "HDFCBANK": "HDFCBANK.NS",
+    "ICICIBANK": "ICICIBANK.NS", "SBIN": "SBIN.NS",
+    "AXISBANK": "AXISBANK.NS", "KOTAKBANK": "KOTAKBANK.NS",
+    "BAJFINANCE": "BAJFINANCE.NS", "BAJAJFINSV": "BAJAJFINSV.NS",
+    # IT giants
+    "TCS": "TCS.NS", "INFY": "INFY.NS", "WIPRO": "WIPRO.NS",
+    "HCLTECH": "HCLTECH.NS", "TECHM": "TECHM.NS",
+    # Energy + metals + infra
+    "ONGC": "ONGC.NS", "NTPC": "NTPC.NS", "POWERGRID": "POWERGRID.NS",
+    "COALINDIA": "COALINDIA.NS", "TATASTEEL": "TATASTEEL.NS",
+    "HINDALCO": "HINDALCO.NS", "JSWSTEEL": "JSWSTEEL.NS",
+    "LT": "LT.NS", "ULTRACEMCO": "ULTRACEMCO.NS", "GRASIM": "GRASIM.NS",
+    # FMCG + pharma
+    "ITC": "ITC.NS", "HINDUNILVR": "HINDUNILVR.NS",
+    "NESTLEIND": "NESTLEIND.NS", "BRITANNIA": "BRITANNIA.NS",
+    "DABUR": "DABUR.NS",
+    "SUNPHARMA": "SUNPHARMA.NS", "CIPLA": "CIPLA.NS",
+    "DRREDDY": "DRREDDY.NS", "DIVISLAB": "DIVISLAB.NS",
+    # Auto + consumer + telecom
+    "MARUTI": "MARUTI.NS", "TITAN": "TITAN.NS",
+    "ASIANPAINT": "ASIANPAINT.NS", "BHARTIARTL": "BHARTIARTL.NS",
+    "TATACONSUM": "TATACONSUM.NS", "ADANIENT": "ADANIENT.NS",
+    # Additional liquid F&O names
+    "INDUSINDBK": "INDUSINDBK.NS",
+    "FEDERALBNK": "FEDERALBNK.NS", "IDFCFIRSTB": "IDFCFIRSTB.NS",
+    "AUBANK": "AUBANK.NS", "PNB": "PNB.NS", "BANKBARODA": "BANKBARODA.NS",
+    "M&M": "M&M.NS", "TATAMOTORS": "TATAMOTORS.NS",
+    "HEROMOTOCO": "HEROMOTOCO.NS", "BAJAJ-AUTO": "BAJAJ-AUTO.NS",
+    "EICHERMOT": "EICHERMOT.NS", "MOTHERSON": "MOTHERSON.NS",
+    "BOSCHLTD": "BOSCHLTD.NS", "MRF": "MRF.NS",
+    "INDIGO": "INDIGO.NS", "JETAIRWAYS": "JETAIRWAYS.NS",
+    "DIXON": "DIXON.NS", "AMBER": "AMBER.NS",
+    "PIDILITIND": "PIDILITIND.NS", "SIEMENS": "SIEMENS.NS",
+    "ABB": "ABB.NS", "GODREJCP": "GODREJCP.NS",
+    "COLGPALM": "COLGPALM.NS", "GAIL": "GAIL.NS",
+    "PETRONET": "PETRONET.NS", "IGL": "IGL.NS",
+    "DLF": "DLF.NS", "LODHA": "LODHA.NS",
+    "ABCAPITAL": "ABCAPITAL.NS", "HDFCLIFE": "HDFCLIFE.NS",
+    "SBILIFE": "SBILIFE.NS", "ICICIPRULI": "ICICIPRULI.NS",
+    "ICICIGI": "ICICIGI.NS", "LICI": "LICI.NS",
+    "PFC": "PFC.NS", "RECLTD": "RECLTD.NS",
+    "IRCTC": "IRCTC.NS", "NAUKRI": "NAUKRI.NS",
+    "DMART": "DMART.NS", "TRENT": "TRENT.NS",
+}
+
+COMMODITY_SYMBOLS = {
+    "CRUDEOIL": "CL=F",
+    "NATURALGAS": "NG=F",
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",  # MCX Silver (US futures proxy)
+    # MCX Mini contracts — used for live MCX session (small capital friendly)
+    "GOLDM": "GC=F",       # Gold Mini (yfinance proxy = Gold futures)
+    "SILVERM": "SI=F",     # Silver Mini (yfinance proxy = Silver futures)
+}
+
+# ============================================================
+# EXPANDED SCAN UNIVERSE — full liquid NSE F&O stock options
+# ============================================================
+# SmartWebSocketV2 has zero rate limits — no reason to cap at 11 stocks.
+# The live scanner dynamically selects the top N (default 50) by Bhavcopy
+# liquidity. This dict provides yfinance tickers for the full F&O universe.
+SCAN_STOCK_SYMBOLS = STOCK_SYMBOLS  # same comprehensive universe
+
+# MCX commodities expanded for scanner (Silver added)
+SCAN_COMMODITY_SYMBOLS = {
+    "CRUDEOIL": "CL=F", "NATURALGAS": "NG=F",
+    "GOLD": "GC=F", "SILVER": "SI=F",
+}
+
+
+def scan_universe() -> dict:
+    """Flat {symbol: ticker} map of the full scan universe (NSE + MCX).
+
+    Used by backtest. Live path uses nse_scan_symbols() / mcx_scan_symbols()
+    to fetch only the active market's symbols (rate-limit optimization).
+    """
+    out = dict(SCAN_STOCK_SYMBOLS)
+    out.update(SCAN_COMMODITY_SYMBOLS)
+    out.update(INDEX_SYMBOLS)
+    return out
+
+
+# ============================================================
+# TWO-MARKET SESSION UNIVERSE (NSE + MCX split)
+# ============================================================
+# NSE:  09:15 - 15:15  ->  4 INDEX OPTIONS + top 50 liquid STOCK OPTIONS
+# MCX:  15:30 - 23:15  ->  4 commodities (GOLDM, SILVERM, CRUDEOIL, NATURALGAS)
+# Two markets NEVER overlap — Tiger fetches only the active market per scan.
+
+def nse_scan_symbols() -> dict:
+    """NSE session symbols — INDEX first + TOP liquid STOCKS (priority order).
+
+    SCANNING PRIORITY:
+      PRIORITY 1: INDEX OPTIONS (NIFTY, BANKNIFTY, FINNIFTY, SENSEX)
+                   scanned FIRST — highest liquidity, tightest spreads.
+      PRIORITY 2: TOP N liquid F&O STOCK OPTIONS (Bhavcopy liquidity filter)
+                   All F&O -> Volume -> Turnover -> OI -> Liquidity Score -> Top N
+                   Default N=50 (config: UNIVERSE["TOP_N_LIQUID_STOCKS"]).
+
+    SmartWebSocketV2 has zero rate limits on streaming data, so the stock
+    cap is set high to exploit the full liquid F&O universe. Tiger is an
+    options-buying engine — only liquid options are traded; illiquid ones
+    are automatically filtered out by the liquidity pipeline.
+    """
+    # PRIORITY 1: INDEX OPTIONS (always first, highest priority)
+    out = dict(INDEX_SYMBOLS)
+    logger.info("SCAN PRIORITY 1: %d INDEX OPTIONS — %s",
+                len(INDEX_SYMBOLS), list(INDEX_SYMBOLS.keys()))
+
+    # PRIORITY 2: TOP N liquid F&O stock options (Bhavcopy dynamic filter)
+    try:
+        from universe.stock_filter import filter_top_liquid_stocks
+        top_stocks = filter_top_liquid_stocks()
+    except Exception as exc:
+        logger.warning("Stock filter fail — fallback top stocks: %s", exc)
+        top_stocks = _fallback_stock_symbols()
+
+    # Add stocks AFTER indices (indices have priority — scanned first)
+    stock_count = 0
+    for sym in top_stocks:
+        if sym in INDEX_SYMBOLS:
+            continue  # skip if somehow an index is in the stock list
+        if sym in STOCK_SYMBOLS:
+            out[sym] = STOCK_SYMBOLS[sym]
+        else:
+            out[sym] = f"{sym}.NS"  # yfinance fallback format
+        stock_count += 1
+
+    logger.info("SCAN PRIORITY 2: %d LIQUID STOCK OPTIONS — %s",
+                stock_count, top_stocks[:10])
+    logger.info("NSE scan universe: %d symbols total (%d index + %d stocks)",
+                len(out), len(INDEX_SYMBOLS), stock_count)
+    return out
+
+
+def _fallback_stock_symbols() -> list[str]:
+    """Return the fallback stock list when Bhavcopy is unavailable.
+
+    19 most liquid F&O stock options — carefully selected for:
+    - High option volume (tight bid-ask spreads)
+    - High open interest (institutional participation)
+    - Consistent intraday momentum (Tiger needs movement)
+
+    Total NSE scan = 4 index + 19 stocks = 23 symbols.
+    This keeps REST candle fetch under 23 calls/refresh — well within
+    Angel One rate limits even during market open.
+    """
+    return [
+        # Banks (highest option liquidity)
+        "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+        # Financials
+        "BAJFINANCE", "BAJAJFINSV",
+        # IT
+        "RELIANCE", "TCS", "INFY", "HCLTECH",
+        # Metals/Energy
+        "TATASTEEL", "HINDALCO", "ONGC",
+        # FMCG
+        "ITC", "HINDUNILVR",
+        # Pharma
+        "SUNPHARMA", "CIPLA",
+        # Infra/Auto
+        "LT", "MARUTI",
+    ]
+
+
+def mcx_scan_symbols() -> dict:
+    """MCX session symbols — 4 commodities (mini contracts for small capital)."""
+    return {
+        "GOLDM": "GC=F",
+        "SILVERM": "SI=F",
+        "CRUDEOIL": "CL=F",
+        "NATURALGAS": "NG=F",
+    }
+
+
+def _apply_candle_cap(symbols: dict[str, str]) -> dict[str, str]:
+    """Trim an NSE symbol dict to MAX_CANDLES_PER_SCAN, indices first.
+
+    Startup pe 27 symbols ka REST candle burst Angel ka rate limit tod deta
+    tha (VELOCITY BLOCK + 429s). Cap sirf REST fetch list ko chhota karta
+    hai — WebSocket sabhi ko stream karta rehta hai, isliye capped symbols
+    live 1m data se hi trade karte hain.
+    """
+    from config.thresholds import UNIVERSE
+    cap = int(UNIVERSE.get("MAX_CANDLES_PER_SCAN", 15))
+    if len(symbols) <= cap:
+        return symbols
+    index_first = [s for s in INDEX_SYMBOLS if s in symbols]
+    rest = [s for s in symbols if s not in index_first]
+    keep = (index_first + rest)[:cap]
+    logger.info("Candle fetch cap: %d -> %d symbols (indices first)",
+                len(symbols), len(keep))
+    return {s: symbols[s] for s in keep}
+
+
+def get_active_scan_symbols(now=None) -> tuple[dict, str]:
+    """Return (symbols_dict, market_label) for the currently active session.
+
+    MCX commodities (CRUDEOIL, GOLDM, SILVERM, NATURALGAS) trade from
+    09:00 AM. Tiger scans NSE + MCX SIMULTANEOUSLY during NSE hours so
+    no commodity opportunity is missed (e.g. morning crude oil spikes).
+
+    NSE returns are capped to MAX_CANDLES_PER_SCAN for the REST candle
+    fetch (indices first); MCX's 4 commodities are always included.
+
+    Returns:
+        (dict, "NSE+MCX")  during 09:15-15:15 (both markets scanned)
+        (dict, "MCX")      during 15:15-23:15 (MCX only, NSE closed)
+        ({}, "CLOSED")     otherwise
+    """
+    from datetime import datetime, time
+    from config.thresholds import AUTOMATION
+
+    if now is None:
+        now = datetime.now()
+    current = now.time()
+
+    nse_open_h, nse_open_m = map(int, AUTOMATION["MARKET_OPEN_TIME"].split(":"))
+    nse_off_h, nse_off_m = map(int, AUTOMATION["NSE_SQUARE_OFF_TIME"].split(":"))
+    mcx_open_h, mcx_open_m = map(int, AUTOMATION["MCX_OPEN_TIME"].split(":"))
+    mcx_close_h, mcx_close_m = map(int, AUTOMATION["MCX_CLOSE_TIME"].split(":"))
+
+    nse_open = time(nse_open_h, nse_open_m)     # 09:15
+    nse_close = time(nse_off_h, nse_off_m)      # 15:15
+    mcx_open = time(mcx_open_h, mcx_open_m)     # 09:00 (MCX opens early)
+    mcx_close = time(mcx_close_h, mcx_close_m)  # 23:15
+
+    mcx_active = mcx_open <= current <= mcx_close
+
+    if nse_open <= current <= nse_close:
+        # NSE + MCX SIMULTANEOUS — user mandate: dono markets me trade ho.
+        # NSE me chal rha hai to MCX bhi chalega. Pehle alag kiye the — galat.
+        # MCX 9:00 se open hai, NSE 9:15 se. Dono scan hote rahenge.
+        nse_syms = _apply_candle_cap(nse_scan_symbols())
+        if mcx_active:
+            combined = dict(nse_syms)
+            combined.update(mcx_scan_symbols())
+            return combined, "NSE+MCX"
+        return nse_syms, "NSE"
+
+    if mcx_active:
+        # NSE closed — MCX only
+        return mcx_scan_symbols(), "MCX"
+
+    return {}, "CLOSED"
+
+
+# Combined universe grouped by segment
+UNIVERSE = {
+    "index": {"label": "Index Options (NIFTY/BANKNIFTY)", "symbols": INDEX_SYMBOLS, "category": "equity"},
+    "stock": {"label": "Stock Options (Top F&O)", "symbols": STOCK_SYMBOLS, "category": "equity"},
+    "commodity": {"label": "Commodity Options (CRUDE/GOLD)", "symbols": COMMODITY_SYMBOLS, "category": "commodity"},
+}
+
+
+def all_symbols() -> dict:
+    """Return flat {symbol: ticker} map across all segments."""
+    out = {}
+    for seg in UNIVERSE.values():
+        out.update(seg["symbols"])
+    return out
+
+
+def segment_of(symbol: str) -> str:
+    """Return segment key for a symbol."""
+    for seg_key, seg in UNIVERSE.items():
+        if symbol in seg["symbols"]:
+            return seg_key
+    return "stock"
+
+
+def lot_size(symbol: str) -> int:
+    """Return exchange-standard lot size for a symbol."""
+    return LOT_SIZES.get(symbol, 1)
+
+
+# Intraday execution windows (IST) — Brain 1 time filter
+# High-momentum hours only; no entries in the dead 11:00-13:30 zone
+ENTRY_WINDOWS = [
+    ("09:15", "11:00"),   # Morning momentum
+    ("13:30", "15:15"),   # Afternoon momentum
+]
+
+# Hard square-off time — Brain 5 MUST exit everything here
+SQUARE_OFF_TIME = "15:15"
+
+# ============================================================
+# INDIAN MARKET STRUCTURAL TIMING (NSE vs MCX)
+# ============================================================
+# NSE (equity F&O — index + stocks): 09:15-15:30 IST, square-off 15:15
+NSE_ENTRY_WINDOWS = [
+    ("09:15", "11:00"),   # Morning momentum
+    ("13:30", "15:15"),   # Afternoon momentum
+]
+NSE_SQUARE_OFF = "15:15"
+
+# MCX (commodities — CRUDE/GOLD/NATGAS): 09:00-23:30 IST, square-off 23:15.
+# MCX has a morning session (09:00-11:30) and a long evening session
+# (17:00-23:30). We allow entries across the MCX day, square-off at 23:15.
+MCX_ENTRY_WINDOWS = [
+    ("09:00", "11:30"),   # MCX morning session
+    ("17:00", "23:00"),   # MCX evening session (high liquidity for intl commodities)
+]
+MCX_SQUARE_OFF = "23:15"
+
+
+def entry_windows_for(segment: str) -> list:
+    """Return the entry windows for a segment ('index'|'stock'|'commodity')."""
+    if segment == "commodity":
+        return MCX_ENTRY_WINDOWS
+    return NSE_ENTRY_WINDOWS
+
+
+def square_off_for(segment: str) -> str:
+    """Return the hard square-off time (HH:MM) for a segment."""
+    if segment == "commodity":
+        return MCX_SQUARE_OFF
+    return NSE_SQUARE_OFF
+
+
+# ============================================================
+# LIQUIDITY TIERS (Brain 3 spread safety)
+# ============================================================
+# Tier 1 = most liquid (index, mega-cap) → tightest spreads.
+# Used to model a realistic bid-ask spread % per contract so the 0.5%
+# spread gate disqualifies illiquid contracts while letting liquid ones
+# through. Real NSE ATM index option spreads ~0.3-0.5%; large-cap stocks
+# ~0.4-0.8%; mid-caps ~0.8-1.5%; MCX commodities ~0.6-1.2%.
+LIQUIDITY_TIER = {
+    "NIFTY": 1, "BANKNIFTY": 1, "FINNIFTY": 1,
+    "RELIANCE": 1, "HDFCBANK": 1, "ICICIBANK": 1, "SBIN": 1, "TCS": 1,
+    "INFY": 1, "AXISBANK": 1, "KOTAKBANK": 1, "BAJFINANCE": 1, "LT": 1,
+    "BHARTIARTL": 2, "ITC": 2, "TATASTEEL": 2, "HINDALCO": 2, "WIPRO": 2,
+    "MARUTI": 2, "SUNPHARMA": 2, "TITAN": 2, "ADANIENT": 2, "GRASIM": 2,
+    "HCLTECH": 2, "TECHM": 2, "ASIANPAINT": 2, "ULTRACEMCO": 2,
+    "POWERGRID": 3, "NTPC": 3, "ONGC": 3, "COALINDIA": 3, "DIVISLAB": 3,
+    "CIPLA": 3, "DRREDDY": 3, "BAJAJFINSV": 3, "NESTLEIND": 3, "BRITANNIA": 3,
+    "TATACONSUM": 3,
+    # Expanded universe additions
+    "INDUSINDBK": 2, "FEDERALBNK": 3, "IDFCFIRSTB": 3, "AUBANK": 3,
+    "PNB": 3, "BANKBARODA": 3, "TATAMOTORS": 2, "HEROMOTOCO": 2,
+    "BAJAJ-AUTO": 2, "EICHERMOT": 2, "M&M": 2, "MRF": 3, "BOSCHLTD": 3,
+    "MOTHERSON": 3, "INDIGO": 2, "JETAIRWAYS": 3, "DIXON": 3, "AMBER": 3,
+    "PIDILITIND": 2, "SIEMENS": 2, "ABB": 3, "GODREJCP": 3, "COLGPALM": 3,
+    "GAIL": 3, "PETRONET": 3, "IGL": 3, "DLF": 2, "LODHA": 3,
+    "ABCAPITAL": 3, "HDFCLIFE": 2, "SBILIFE": 2, "ICICIPRULI": 3,
+    "ICICIGI": 3, "LICI": 2, "PFC": 3, "RECLTD": 3,
+    "IRCTC": 3, "NAUKRI": 3, "DMART": 2, "TRENT": 3,
+    "HINDUNILVR": 2, "DABUR": 3, "JSWSTEEL": 2,
+    # MCX commodities — separate session, different spread regime
+    "CRUDEOIL": 2, "GOLDM": 2, "SILVERM": 2, "NATURALGAS": 3,
+}
+
+
+def liquidity_tier(symbol: str) -> int:
+    """Return 1 (most liquid), 2, or 3 (least liquid)."""
+    return LIQUIDITY_TIER.get(symbol, 3)
+
+
+# ============================================================
+# V6.5 — EXPIRY DAY SCHEDULE (Brain 3 zero-to-hero engine)
+# ============================================================
+# NSE weekly expiry schedule (default conventions, IST):
+#   NIFTY      → Thursday
+#   BANKNIFTY  → Wednesday  (post-Nov 2023; was Friday earlier)
+#   Stocks (monthly) → last Thursday of the month
+# MCX commodity expiry → last business day of the month (approx).
+EXPIRY_DAY_OF_WEEK = {
+    "NIFTY": 3,        # Thursday (0=Mon)
+    "BANKNIFTY": 2,    # Wednesday
+    "FINNIFTY": 1,     # Tuesday
+}
+
+
+def is_expiry_day(symbol: str, dt) -> bool:
+    """True if `dt` is the weekly/monthly expiry day for the symbol."""
+    import pandas as pd
+    d = pd.Timestamp(dt)
+    if d.tz is not None:
+        d = d.tz_convert("Asia/Kolkata")
+    dow = d.weekday()
+    # Index: weekly expiry on the assigned weekday
+    if symbol in EXPIRY_DAY_OF_WEEK:
+        return dow == EXPIRY_DAY_OF_WEEK[symbol]
+    # Stocks: monthly expiry = last Thursday of the month
+    if symbol in SCAN_STOCK_SYMBOLS or symbol in STOCK_SYMBOLS:
+        # last Thursday of the month
+        last_day = d + pd.offsets.MonthEnd(0)
+        # walk back to the last Thursday (weekday 3)
+        t = last_day
+        while t.weekday() != 3:
+            t = t - pd.Timedelta(days=1)
+        return d.date() == t.date()
+    # MCX commodities: last business day of month (approx)
+    if symbol in SCAN_COMMODITY_SYMBOLS or symbol in COMMODITY_SYMBOLS:
+        last_day = (d + pd.offsets.MonthEnd(0)).date()
+        return d.date() == last_day
+    return False
