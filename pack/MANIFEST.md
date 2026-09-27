@@ -57,12 +57,13 @@ Each folder carries `_VERSION.txt` with its ref and label.
 
 ## 3. LIVE SERVER VERSION (the important one)
 
-This one is **NOT on GitHub**. It exists only on the EC2 box and is therefore
-**newer than every GitHub commit**.
+This one is **NOT on GitHub**. It existed only on the EC2 box.
 
 | Field | Value |
 |---|---|
-| Commit | `d9a5694` — `Fix: NoneType guard in _place_exit_orders (003a9ff crash)` |
+| Commit | `d9a5694e302fa7ddb4561eb521d4afd7cc692d80` |
+| Message | `Fix: NoneType guard in _place_exit_orders (003a9ff crash)` |
+| Author | `openhands <openhands@all-hands.dev>` |
 | Authored | `2026-09-25 14:53:31 +0000` (IST 20:23:31) |
 | Branch on server | `life-pure-003a9ff` |
 | Repo path on EC2 | `/home/ec2-user/tiger-brain-v6` |
@@ -70,55 +71,70 @@ This one is **NOT on GitHub**. It exists only on the EC2 box and is therefore
 | Service | `tiger-brain.service` — **active**, PID 1444731 |
 | Running since | `2026-09-25 20:24:12 IST` |
 | TZ | `Asia/Kolkata` (confirmed) |
-| Uptime of box | 4 weeks 2 days |
+| Retrieved | 2026-09-28 from `pack/history/LIVE-SERVER.bundle` (bundle verified, complete history) |
 
-### To fetch it (run on EC2, as ec2-user)
+### ★ KEY FINDING — the live version is a FORK of 84724d6, not a descendant of main
 
-```bash
-git -C /home/ec2-user/tiger-brain-v6 bundle create /tmp/live.bundle --all
-scp ec2-user@3.108.53.100:/tmp/live.bundle .
+`git merge-base 84724d6 d9a5694` = **84724d6 itself**.
+
+So `84724d6` is literally the fork point. The live branch is only **4 commits**
+ahead of your main version:
+
+```
+d9a5694 | 2026-09-25 14:53 | Fix: NoneType guard in _place_exit_orders (003a9ff crash)
+e0fd543 | 2026-09-25 14:45 | Fix: RESCAN_INTERVAL_MINUTES in AUTOMATION dict (dead key)
+df6dd33 | 2026-09-25 14:38 | 003a9ff + RESCAN 20→2 min (MCX night trading, till 23:30)
+003a9ff | 2026-09-07 17:26 | FIX: Rate limit detection (AB1021) + 1s symbol gap
+--------- 84724d6  (your main — the fork point) ---------
 ```
 
-Then unpack into `pack/versions/05-LIVE-server-d9a5694/`:
+And in the **other** direction, the live branch is **missing 86 commits** that
+exist on main — the whole WebSocket V2 rewrite, ML ensemble, SMC + Greeks engine,
+rate-limit hardening V2, etc. all of that is **NOT running**.
 
-```bash
-mkdir -p pack/versions/05-LIVE-server-d9a5694
-git clone pack/versions/05-LIVE-server-d9a5694/live.bundle _tmp_live
-git -C _tmp_live archive d9a5694 | tar -x -C pack/versions/05-LIVE-server-d9a5694
-rm -rf _tmp_live
-```
-
-> Note: do **not** put the bundle inside the destination folder being extracted
-> into — use the path above exactly.
+**Meaning:** the bot is running a deliberately minimal, hand-patched recovery
+line based on `84724d6` + 4 hotfixes. Your choice of `84724d6` as "main" matches
+exactly what the live system is derived from.
 
 ### Why this version matters
 
-Its commit message is literally about a crash in the exit-order code that
-`84724d6` introduced:
+Its commit message names a crash in the exit-order code that `84724d6` introduced
+(its W5 `_place_exit_orders()`). That code **did crash in production**, was fixed
+on the server on Sep 25, and the fix was never pushed to GitHub.
 
-> `Fix: NoneType guard in _place_exit_orders (003a9ff crash)`
-
-So `_place_exit_orders()` from 84724d6 (its W5) **did crash in production**, and
-the fix was made on the server on Sep 25 and never pushed to GitHub.
+So the 3 hotfixes above are the *only* delta between your main and the running
+system — and all three are server-only.
 
 ---
 
-## 4. HISTORY — `pack/history/ALL-HISTORY.bundle`
+## 4. HISTORY — `pack/history/`
 
-Complete history of all 9 remote branches, single file (1.5 MB), restorable
-offline without network:
+| Bundle | Size | Contents |
+|---|---|---|
+| `ALL-HISTORY.bundle` | 1.5 MB | All 9 branches from **GitHub** |
+| `LIVE-SERVER.bundle` | 1.0 MB | All branches from the **EC2 box** — contains `d9a5694` (verified: complete history, sha1) |
+
+Restorable offline, no network needed:
 
 ```bash
-git clone pack/history/ALL-HISTORY.bundle myrepo
+git clone pack/history/ALL-HISTORY.bundle    myrepo-github
+git clone pack/history/LIVE-SERVER.bundle    myrepo-live
 ```
 
 ---
 
-## 5. IMPORTANT WARNING
+## 5. QUICK REFERENCE
 
-`pack/versions/01..04` are all from **GitHub**.
+| I want to… | Look at |
+|---|---|
+| The version you asked for / the base of the live system | `tiger-brain-v6/` (= `84724d6`) |
+| The version actually trading right now | `pack/versions/05-LIVE-server-d9a5694/` |
+| Latest pushed to GitHub | `pack/versions/01-github-main-8ad42c0/` |
+| Full history, offline | `pack/history/*.bundle` |
 
-The version **actually trading real money** is `05-LIVE-server-d9a5694`, and it
-is only on the EC2 box. If you are going to work from this pack, make sure you
-are looking at the right one — GitHub `main` is **2 days older** than what the
-bot is running.
+**Lineage in one line:**
+`84724d6` (your main, = fork point) → `003a9ff` → `df6dd33` → `e0fd543` → `d9a5694` (LIVE)
+
+The live system = your main + 3 server-only hotfixes. It does **not** contain
+the 86 commits of development that are on main and in GitHub.
+
