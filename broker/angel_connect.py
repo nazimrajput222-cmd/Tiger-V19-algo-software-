@@ -343,6 +343,28 @@ class AngelBroker:
             return {"status": "UNKNOWN", "filled_qty": 0,
                     "avg_price": 0.0, "reject_reason": None}
 
+    def stream_auth(self) -> dict:
+        """SmartStream V2 WebSocket ke liye auth values (jwt/api/feed token).
+
+        SDK generateSession jwtToken ko "Bearer ..." ke saath deta hai —
+        WebSocket Authorization header wahi format maangta hai.
+        """
+        self.ensure_logged_in()
+        data = (self.session_data or {}).get("data") or {}
+        jwt = data.get("jwtToken") or ""
+        if jwt and not jwt.startswith("Bearer "):
+            jwt = "Bearer " + jwt
+        feed = data.get("feedToken")
+        if not feed and self.smart_api is not None:
+            try:
+                feed = self.smart_api.getfeedToken()
+            except Exception:
+                feed = None
+        if not jwt or not feed:
+            raise AngelConnectionError("stream_auth: jwt/feed token session mein nahi mila")
+        return {"jwt": jwt, "api_key": self.api_key,
+                "client_code": self.client_id, "feed_token": feed}
+
     def get_positions(self) -> list:
         """Current open positions laata hai (square-off ke liye)."""
         self.ensure_logged_in()

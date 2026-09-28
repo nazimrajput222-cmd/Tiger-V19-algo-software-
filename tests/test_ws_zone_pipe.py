@@ -102,3 +102,12 @@ def test_candle_gate_blocks_repeat_of_same_candle():
     ts = pd.Timestamp(t0, unit="ms", tz="Asia/Kolkata").tz_localize(None)
     assert zone.allow_candle("NIFTY", ts) is False    # same candle reprocess
     assert pipe.bars_pushed == before
+
+
+def test_broker_exposes_stream_auth():
+    """WS pipe ko AngelBroker.stream_auth() chahiye (original 84724d6 mein nahi tha)."""
+    import inspect
+    from broker.angel_connect import AngelBroker
+    assert hasattr(AngelBroker, "stream_auth")
+    src = inspect.getsource(AngelBroker.stream_auth)
+    assert "jwtToken" in src and "feedToken" in src
