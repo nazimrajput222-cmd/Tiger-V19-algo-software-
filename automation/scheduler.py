@@ -15,8 +15,12 @@ logic (is_trading_day, get_day_mode, etc.) — ye pure Python hai, koi
 extra dependency nahi chahiye, aur neeche test bhi hua hai.
 """
 
+import logging
+import os
 import sys
 from datetime import datetime, time
+
+logger = logging.getLogger("tiger_brain.scheduler")
 
 try:
     from config.thresholds import AUTOMATION

@@ -59,3 +59,33 @@ def test_template_is_not_loaded():
     import os
     assert os.path.exists(os.path.join(H.HOLIDAY_DIR, "TEMPLATE.json.example"))
     assert 2027 not in H.CALENDAR_YEARS
+
+
+def test_setup_jobs_with_intraday_actually_runs(monkeypatch):
+    """setup_jobs(intraday_fn=...) poora execute hona chahiye — pehle ek missing
+    `import os` sirf is path par chala, to 448 tests green the aur service
+    crash-loop mein chala gaya. Ye guard wahi gap band karta hai."""
+    import automation.scheduler as sch
+    monkeypatch.setenv("TIGER_RESCAN_INTERVAL_MINUTES", "5")
+    monkeypatch.setattr(sch, "get_day_mode", lambda *a: "TRADING")
+    monkeypatch.setattr(sch, "is_market_hours", lambda *a: True)
+    monkeypatch.setattr(sch, "is_opening_range_period", lambda *a: False)
+
+    class Fake:
+        def __init__(self): self.jobs = {}
+        def add_job(self, fn, trig, **kw):
+            self.jobs[kw.get("id", str(len(self.jobs)))] = (fn, trig, kw)
+        def start(self): pass
+        def shutdown(self): pass
+
+    s = Fake()
+    sch.TigerBrainScheduler.__init__.__wrapped__ if False else None
+    obj = sch.TigerBrainScheduler.__new__(sch.TigerBrainScheduler)
+    obj.scheduler = s
+    sch.TigerBrainScheduler.setup_jobs(
+        obj, pre_market_fn=lambda: None, market_open_fn=lambda: None,
+        intraday_fn=lambda: None, market_close_fn=lambda: None,
+        nightly_replay_fn=lambda: None, nse_square_off_fn=lambda: None,
+        mcx_square_off_fn=lambda: None, delivery_snapshot_fn=lambda: None)
+    assert "intraday_scan" in s.jobs
+    assert s.jobs["intraday_scan"][2]["minutes"] == 5
