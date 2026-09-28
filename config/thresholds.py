@@ -368,3 +368,46 @@ MARKET_CATEGORIES = {
 
 import os
 DRY_RUN = os.getenv("TIGER_BRAIN_DRY_RUN", "false").lower() == "true"
+
+
+# ============================================================
+# WEBSOCKET V2 DATA PLANE (strategy is UNCHANGED original zone engine)
+# ============================================================
+import os as _os
+
+
+def _envf(name, default):
+    try:
+        return float(_os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+WS_V2 = {
+    "ENABLED": _os.getenv("TIGER_WS_V2_ENABLED", "true").lower() == "true",
+    "URL": "wss://smartapisocket.angelone.in/smart-stream",
+    "MAX_TOKENS_PER_CONNECTION": int(_os.getenv("TIGER_WS_MAX_TOKENS_PER_CONN", 1000)),
+    "MAX_CONNECTIONS": int(_os.getenv("TIGER_WS_MAX_CONNECTIONS", 3)),
+    "MAX_TOTAL_TOKENS": int(_os.getenv("TIGER_WS_MAX_TOTAL_TOKENS", 1200)),
+    "HEARTBEAT_SEC": 25,
+    "STALE_TIMEOUT_SEC": 60,
+    "RECONNECT_BASE_SEC": 2.0,
+    "RECONNECT_MAX_SEC": 60.0,
+    "SUBSCRIBE_BATCH_SIZE": 200,
+    "BAR_MINUTES": 1,                      # zone engine 1m par tick karta hai
+    # Spec ke mutabiq naye knobs (84724d6 mein nahi thay)
+    "CANDLE_GATE_SEC": _envf("TIGER_CANDLE_GATE_SEC", 0.35),
+    "SCAN_DEDUP_SEC": _envf("TIGER_SCAN_DEDUP_SEC", 30.0),
+    "MAX_BARS_15M": 500,
+    "MAX_BARS_1M": 2000,
+    "MAX_STRIKE_RINGS": 3,
+    "RECENTER_STRIKES": 1,
+    "RECENTER_CHECK_SEC": 60,
+    "FIRST_TICK_WAIT_SEC": 20,
+    "WARMUP_DAYS": int(_os.getenv("TIGER_WS_WARMUP_DAYS", 7)),
+    "WARMUP_PAUSE_SEC": 0.4,
+    "MCX_ALLOWED_ROOTS": tuple(
+        r.strip().upper() for r in
+        _os.getenv("TIGER_MCX_ROOTS", "GOLDM,SILVERM,CRUDEOIL,NATURALGAS").split(",")
+        if r.strip()),
+}

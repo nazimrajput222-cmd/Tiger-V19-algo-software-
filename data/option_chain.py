@@ -157,10 +157,15 @@ def refresh_registry(
     exchange: str = DEFAULT_EXCHANGE,
     cache_dir: str = DEFAULT_CACHE_DIR,
     master: list | None = None,
+    today: date | None = None,
 ) -> dict:
     """
     Aaj ke live contracts registry mein jodta hai (purane kabhi hataye
     nahi jaate — wahi to expire hone ke baad kaam aate hain).
+
+    `today` sirf testing ke liye: `first_seen` wahi din hai jis din contract
+    registry mein pehli baar dikha, isliye usse inject karne se coverage
+    window real ghadi se nahi judti aur tests waqt ke saath nahi sente hain.
 
     Returns: poori registry {symbol: contract}
     """
@@ -171,16 +176,16 @@ def refresh_registry(
         underlying, exchange,
     )
 
-    today = now_ist().date().isoformat()
+    stamp = (today if today is not None else now_ist().date()).isoformat()
     added = 0
     for symbol, contract in live.items():
         if symbol not in registry:
-            contract["first_seen"] = today
+            contract["first_seen"] = stamp
             registry[symbol] = contract
             added += 1
         else:
             registry[symbol].update(contract)
-        registry[symbol]["last_seen"] = today
+        registry[symbol]["last_seen"] = stamp
 
     save_registry(registry, path)
     logger.info(

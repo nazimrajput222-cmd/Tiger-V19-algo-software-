@@ -37,7 +37,8 @@ from automation.scheduler import (
     is_mcx_hours,
 )
 from data.loader import resolve_option_contract
-from config.thresholds import AUTOMATION, MARKET_CATEGORIES
+from config.thresholds import AUTOMATION, MARKET_CATEGORIES, WS_V2
+from automation.live_zone_engine import LiveZoneEngine, run_zone_engine
 
 
 def resolve_exchange_for_symbol(symbol: str) -> str:
@@ -74,6 +75,11 @@ class TigerLiveRunner:
         self.capital_start: float = 0.0
         self.capital_after_entry: float = 0.0
         self.capital_after_exit: float = 0.0
+        # WS V2 data plane — zone engine ko 1m/15m bars deta hai
+        self.zone_engine = LiveZoneEngine(
+            max_bars_15m=WS_V2["MAX_BARS_15M"], max_bars_1m=WS_V2["MAX_BARS_1M"],
+            candle_gate_sec=WS_V2["CANDLE_GATE_SEC"],
+            scan_dedup_sec=WS_V2["SCAN_DEDUP_SEC"])
 
     def _load_order_keys(self) -> set[str]:
         """Disk se placed order keys load karo (restart-safe)."""
@@ -188,9 +194,13 @@ class TigerLiveRunner:
         try:
             from backtest.run_tiger_brain_backtest import run_tiger_brain_backtest
             capital = self.account_capital if self.account_capital > 0 else 10000.0
+            data_map, data_map_1m = self._live_data_maps()
+            if not data_map:
+                logger.info("Zone engine: abhi 15m bars nahi — scan skip.")
+                return
             combined = run_tiger_brain_backtest(
-                self.data_map, start_capital=capital,
-                data_map_1m=self.data_map_1m if self.data_map_1m else None,
+                data_map, start_capital=capital,
+                data_map_1m=data_map_1m if data_map_1m else None,
                 broker=self.broker)
             trades = combined.get("trades", [])
             totals = combined.get("totals", {})
@@ -635,6 +645,12 @@ class TigerLiveRunner:
                 logger.info("Koi delivery signal nahi — aaj overnight nahi.")
         except Exception as exc:
             logger.error("Delivery snapshot error: %s", exc)
+
+    def _live_data_maps(self) -> tuple[dict, dict]:
+        """WS V2 on → zone engine ke live 1m/15m bars. Off → REST data_map."""
+        if WS_V2["ENABLED"] and self.zone_engine is not None:
+            return self.zone_engine.data_maps()
+        return self.data_map, self.data_map_1m
 
     # ============================================================
     # MARKET CLOSE — NSE 15:15 square-off + MCX 23:15 square-off

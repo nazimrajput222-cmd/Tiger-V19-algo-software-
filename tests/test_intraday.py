@@ -352,6 +352,12 @@ def test_missing_ranges_only_fetches_tail_when_cache_covers_start():
 
 def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
     """20 din cache karke 60 din maango to purana hissa bhi fetch ho."""
+    # "Aaj" ko pin karna zaroori hai. load_intraday apna window waqt ki
+    # ghadi se banata hai, isliye bina pin ke backfill range har din
+    # chhota hota jaata aur test apni hi date ki wajah se fail hota.
+    monkeypatch.setattr(
+        intraday, "now_ist", lambda: datetime(2026, 9, 7, 15, 30)
+    )
     save_cache(make_session("2026-08-31"), "NIFTY", "FIVE_MINUTE", str(tmp_path))
     calls = []
 
@@ -362,7 +368,11 @@ def test_load_intraday_backfills_older_window(monkeypatch, tmp_path):
     monkeypatch.setattr(intraday, "_fetch_from_angel", fake_fetch)
     load_intraday(interval="FIVE_MINUTE", days=60, cache_dir=str(tmp_path))
 
-    assert len(calls) == 2
+    # 60-din window = 09JUL → 07SEP, cache sirf 31AUG ka hai
+    assert calls == [
+        (datetime(2026, 7, 9), datetime(2026, 9, 1)),   # backfill
+        (datetime(2026, 8, 31), datetime(2026, 9, 7, 15, 30)),  # tail
+    ]
     assert (calls[0][1] - calls[0][0]).days >= 40
 
 
