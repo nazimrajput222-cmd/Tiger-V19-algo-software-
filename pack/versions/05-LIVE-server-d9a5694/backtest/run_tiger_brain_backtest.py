@@ -1771,7 +1771,7 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 is_call = setup["direction"] == "BUY"
 
                 # === BRAIN 7: Session-based score threshold + force hunt ===
-                ts_ist = ts.tz_convert("Asia/Kolkata") if hasattr(ts, 'tz_convert') else ts
+                ts_ist = _to_ist(ts)
                 ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
                 force_hunt = False
                 adjusted_score_threshold = ROCKET_MIN_SCORE
