@@ -51,6 +51,7 @@ class LiveZoneEngine:
         self._bars_15m: dict[str, dict] = defaultdict(dict)
         self._forming: dict[str, pd.Timestamp] = {}     # abhi bhar raha bucket
         self._last_process: dict[str, float] = {}             # candle gate
+        self._last_bar: dict[str, tuple] = {}                 # symbol → (ts, at)
         self._last_scan: dict[str, float] = {}               # dedup
         self._lock = threading.RLock()
 
@@ -150,13 +151,19 @@ class LiveZoneEngine:
     # ------------------------------------------------------------------
     # gates
     # ------------------------------------------------------------------
-    def allow_candle(self, symbol: str) -> bool:
-        """0.35s candle gate — ek symbol par back-to-back processing nahi."""
+    def allow_candle(self, symbol: str, bar_ts=None) -> bool:
+        """0.35s candle gate.
+
+        Gate ka matlab: wahi candle 0.35s ke andar dobara process na ho.
+        ALAG candle (alag timestamp) KABHI block nahi hota — 1m candles
+        60s door band hoti hain, unhe gate throttling nahi karni chahiye.
+        """
         now = time.monotonic()
         with self._lock:
-            last = self._last_process.get(symbol, 0.0)
-            if now - last < self.candle_gate_sec:
+            last_ts, last_at = self._last_bar.get(symbol, (None, 0.0))
+            if bar_ts is not None and bar_ts == last_ts and now - last_at < self.candle_gate_sec:
                 return False
+            self._last_bar[symbol] = (bar_ts, now)
             self._last_process[symbol] = now
             return True
 

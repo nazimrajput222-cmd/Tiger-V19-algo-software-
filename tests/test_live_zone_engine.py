@@ -33,12 +33,16 @@ def test_15m_buckets_split_at_0915_anchor():
     assert list(dm["NIFTY"].index) == [base, base + timedelta(minutes=15)]
 
 
-def test_candle_gate_blocks_rapid_reprocess():
+def test_candle_gate_blocks_only_the_same_candle():
+    import pandas as pd
     e = LiveZoneEngine(candle_gate_sec=0.35, scan_dedup_sec=30.0)
-    assert e.allow_candle("NIFTY") is True
-    assert e.allow_candle("NIFTY") is False      # < 0.35s
+    t1 = pd.Timestamp("2026-09-28 09:15")
+    t2 = pd.Timestamp("2026-09-28 09:16")
+    assert e.allow_candle("NIFTY", t1) is True
+    assert e.allow_candle("NIFTY", t1) is False     # wahi candle, <0.35s
+    assert e.allow_candle("NIFTY", t2) is True      # ALAG candle → chalti hai
     assert e.allow_scan("NIFTY") is True
-    assert e.allow_scan("NIFTY") is False       # < 30s
+    assert e.allow_scan("NIFTY") is False           # 30s dedup
 
 
 def test_seed_history_then_live_bars_coexist():

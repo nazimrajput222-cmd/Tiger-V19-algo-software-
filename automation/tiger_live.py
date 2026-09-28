@@ -39,6 +39,7 @@ from automation.scheduler import (
 from data.loader import resolve_option_contract
 from config.thresholds import AUTOMATION, DRY_RUN, MARKET_CATEGORIES, WS_V2
 from automation.live_zone_engine import LiveZoneEngine, run_zone_engine
+from automation.ws_zone_pipe import WSZonePipe
 
 
 def resolve_exchange_for_symbol(symbol: str) -> str:
@@ -80,6 +81,10 @@ class TigerLiveRunner:
             max_bars_15m=WS_V2["MAX_BARS_15M"], max_bars_1m=WS_V2["MAX_BARS_1M"],
             candle_gate_sec=WS_V2["CANDLE_GATE_SEC"],
             scan_dedup_sec=WS_V2["SCAN_DEDUP_SEC"])
+        # WS ticks → zone engine ka asli data pipe
+        self.zone_pipe = WSZonePipe(
+            self.zone_engine, lambda: self._ws_broker(), ws_cfg=WS_V2,
+            max_total_tokens=WS_V2["MAX_TOTAL_TOKENS"])
 
     def _load_order_keys(self) -> set[str]:
         """Disk se placed order keys load karo (restart-safe)."""
@@ -684,6 +689,21 @@ class TigerLiveRunner:
         except Exception as exc:
             logger.error("Delivery snapshot error: %s", exc)
 
+    def _ws_broker(self):
+        """Stream ke liye logged-in broker (session reuse)."""
+        if getattr(self, "broker", None) is None:
+            from broker.angel_connect import AngelBroker
+            self.broker = AngelBroker()
+        self.broker.ensure_logged_in()
+        return self.broker
+
+    def start_zone_pipe(self):
+        """Market open pe live 1m bars zone engine mein daalna shuru."""
+        try:
+            self.zone_pipe.start()
+        except Exception as exc:
+            logger.error("❌ Zone pipe start error: %s", exc, exc_info=True)
+
     def _live_data_maps(self) -> tuple[dict, dict]:
         """WS V2 on → zone engine ke live 1m/15m bars. Off → REST data_map."""
         if WS_V2["ENABLED"] and self.zone_engine is not None:
@@ -846,6 +866,8 @@ class TigerLiveRunner:
             logger.info("🐅 Market pehle se open hai — turant broker login + scan start.")
             self.pre_market_wake()
             self.market_open()
+            if WS_V2["ENABLED"]:
+                self.start_zone_pipe()
 
         # Graceful shutdown
         def _shutdown(signum, frame):
@@ -867,7 +889,12 @@ class TigerLiveRunner:
             self.stop()
 
     def stop(self):
-        """Scheduler shutdown."""
+        """Scheduler + WS pipe shutdown."""
+        if getattr(self, "zone_pipe", None) is not None:
+            try:
+                self.zone_pipe.stop()
+            except Exception as exc:
+                logger.warning("Zone pipe stop warning: %s", exc)
         if self.scheduler:
             self.scheduler.shutdown()
         self._running = False
