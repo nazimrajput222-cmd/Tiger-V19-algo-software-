@@ -1,0 +1,10 @@
+{
+  "year": 2027,
+  "source": "NSE circular NSE/CMTR/<number> dated <DD-Mon-YYYY>",
+  "nse": {
+    "2027-01-26": "Republic Day"
+  },
+  "mcx_full_closed": {
+    "2027-01-26": "Republic Day"
+  }
+}

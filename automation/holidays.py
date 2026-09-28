@@ -19,6 +19,7 @@ calendar page check karke.
 
 from __future__ import annotations
 
+import os
 from datetime import date
 
 # 2026 NSE Equity/F&O trading holidays (jab exchange PURA band rehta hai)
@@ -63,6 +64,80 @@ def has_holiday_calendar(year: int) -> bool:
     return year in CALENDAR_YEARS
 
 
+# MCX jin dino POORA din band hai (morning + evening). Baaki NSE holidays pe
+# MCX ka morning band aur evening (17:00+) khula rehta hai — MCX standard practice.
+# Source: Zerodha holiday calendar "MCX holidays" section (2026).
+MCX_FULL_CLOSED = {
+    date(2026, 1, 26): "Republic Day",
+    date(2026, 4, 3): "Good Friday",
+    date(2026, 8, 15): "Independence Day",
+    date(2026, 10, 2): "Mahatma Gandhi Jayanti",
+    date(2026, 11, 8): "Diwali Laxmi Pujan (Muhurat only)",
+    date(2026, 12, 25): "Christmas",
+}
+
+# Saal jin ki official list repo mein hai. Is list ke bahar ke saal
+# FAIL-CLOSED hote hain (neeche dekho) — andaza wali dates kabhi nahi.
+CALENDAR_YEARS = {2026}
+CALENDAR_SOURCES = {2026: "NSE trading holidays 2026 (exchange circular)"}
+
+
+def calendar_known(year: int) -> bool:
+    return year in CALENDAR_YEARS
+
+
+def load_holiday_file(path: str) -> int:
+    """
+    config/holidays/<year>.json load karo. Strict validation:
+      * 'source' (official circular ref) likhna ZAROORI hai
+      * har date usi saal ki honi chahiye
+      * list khali nahi honi chahiye
+    Galat file → ValueError (adhoori list kabhi load nahi hoti).
+    """
+    import json
+    import os
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    year = int(raw["year"])
+    if not raw.get("source"):
+        raise ValueError(f"{path}: 'source' (official circular ref) zaroori hai")
+    nse = {}
+    for k, v in (raw.get("nse") or {}).items():
+        d = date.fromisoformat(k)
+        if d.year != year:
+            raise ValueError(f"{path}: {k} saal {year} ka nahi hai")
+        nse[d] = str(v)
+    mcx = {}
+    for k, v in (raw.get("mcx_full_closed") or {}).items():
+        d = date.fromisoformat(k)
+        if d.year != year:
+            raise ValueError(f"{path}: {k} saal {year} ka nahi hai")
+        mcx[d] = str(v)
+    if not nse:
+        raise ValueError(f"{path}: 'nse' list khali hai")
+    NSE_HOLIDAYS_2026.update(nse)
+    MCX_FULL_CLOSED.update(mcx)
+    CALENDAR_YEARS.add(year)
+    CALENDAR_SOURCES[year] = str(raw["source"])
+    return year
+
+
+def load_holiday_dir(directory: str = None) -> list:
+    directory = directory or HOLIDAY_DIR
+    loaded = []
+    if not os.path.isdir(directory):
+        return loaded
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            loaded.append(load_holiday_file(path))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"[holidays] ERROR load {path}: {exc} — us saal ka calendar UNKNOWN")
+    return loaded
+
+
 def is_market_holiday(check_date: date) -> tuple:
     """
     Args:
@@ -78,7 +153,33 @@ def is_market_holiday(check_date: date) -> tuple:
     if check_date in NSE_HOLIDAYS_2026:
         return True, NSE_HOLIDAYS_2026[check_date]
 
+    if check_date.year not in CALENDAR_YEARS:
+        # FAIL-CLOSED: is saal ki official list nahi → pata hi nahi ki kaunsa
+        # din holiday hai. Andaze se trading day maanna = holiday pe order.
+        return True, (f"⚠️ {check_date.year} ki holiday list load nahi — "
+                      f"fail-closed (config/holidays/{check_date.year}.json chahiye)")
+
     return False, None
+
+
+# JSON holiday files (agle saalon ke official lists) load karo
+HOLIDAY_DIR = os.getenv(
+    "TIGER_HOLIDAY_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 "config", "holidays"),
+)
+load_holiday_dir()
+
+
+def calendar_reminder(check_date: date = None) -> str | None:
+    """1 December se agle saal ki list missing ho → reminder message."""
+    d0 = check_date or date.today()
+    d = d0.date() if hasattr(d0, "date") else d0
+    nxt = d.year + 1
+    if d.month == 12 and nxt not in CALENDAR_YEARS:
+        return (f"📅 {nxt} ki NSE holiday list load nahi. Official circular aate hi "
+                f"config/holidays/{nxt}.json daalo — warna {nxt} se trading fail-closed rahegi.")
+    return None
 
 
 # ============================================================

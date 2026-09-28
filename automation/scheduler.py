@@ -200,9 +200,21 @@ class TigerBrainScheduler:
                 if get_day_mode() == "TRADING" and is_market_hours() and not is_opening_range_period():
                     intraday_fn()
 
+            # Rescan interval env se (TIGER_RESCAN_INTERVAL_MINUTES). Default 5 min.
+            # NOTE: engine 15m zone bars + 1m data pe score karta hai, isliye 1 min
+            # se tez scan ka naya signal nahi aata — sirf CPU/barani hogi. 223
+            # symbols × 2-core/913MB box par 30s interval heavy padega; isliye 5
+            # default rakha hai. Agar sasti machines par chala rahe ho to 10-15
+            # min bhi soch sakte ho.
+            try:
+                _rescan = int(os.getenv("TIGER_RESCAN_INTERVAL_MINUTES", "5"))
+            except ValueError:
+                _rescan = 5
+            _rescan = max(1, _rescan)
+            logger.info("Intraday rescan interval: %d min", _rescan)
             self.scheduler.add_job(
                 intraday_guarded, "interval",
-                minutes=AUTOMATION.get("RESCAN_INTERVAL_MINUTES", 20),
+                minutes=_rescan,
                 id="intraday_scan",
             )
 
