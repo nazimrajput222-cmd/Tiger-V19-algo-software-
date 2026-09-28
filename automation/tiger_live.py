@@ -69,6 +69,8 @@ class TigerLiveRunner:
         self._running = False
         # Track placed order keys — disk se load, restart pe safe
         self._placed_order_keys: set[str] = self._load_order_keys()
+        self._lock = __import__("threading").Lock()
+        self._dup_lock = None          # engine.executor.DuplicateLock (60s mutex)
         self._order_log: list[dict] = []
         # Real account capital — Angel One se fetch hota hai pre-market
         self.account_capital: float = 0.0
@@ -468,15 +470,70 @@ class TigerLiveRunner:
                 continue
             transaction_type = "BUY"
             product_type = "CARRYFORWARD" if is_delivery else "INTRADAY"
-            result = self.broker.place_option_order(
-                tradingsymbol=contract["tradingsymbol"],
-                symboltoken=contract["symboltoken"],
-                exchange=contract["exchange"],
-                transaction_type=transaction_type,
-                quantity=quantity,
-                product_type=product_type,
-                order_type="MARKET",
-            )
+
+            # === INSTITUTIONAL GUARDRAILS (engine/) ===
+            # Purana path MARKET order lagata tha. Ab: LIMIT @ Best Ask + 0.05,
+            # OI >= 1000, spread <= 1.5%, 10s unfilled auto-cancel, 60s duplicate
+            # mutex. Koi guardrail fail kare to order JAATA HI NAHI.
+            from config import settings as _S
+            from engine.executor import (DuplicateLock, build_limit_buy,
+                                         check_margin, place_with_watchdog)
+            from engine.scorer import Quote, passes_guardrails
+
+            need = quantity * real_ltp
+            ok_margin, why_margin = check_margin(available_balance, need)
+            if not ok_margin:
+                logger.error("🔴 MARGIN BLOCK: %s — %s", symbol, why_margin)
+                self._notify(f"🔴 MARGIN BLOCK {symbol}: {why_margin}")
+                continue
+
+            token = str(contract["symboltoken"])
+            pipe = getattr(self, "zone_pipe", None)
+            if pipe is None:
+                logger.error("🔴 No WS pipe — cannot verify bid/ask/OI. No order.")
+                continue
+            pipe.register_option_quote(contract["exchange"], token,
+                                       contract["tradingsymbol"])
+            q = pipe.quote(token, wait_s=4.0) or {}
+            qc = Quote(token=token, symbol=contract["tradingsymbol"],
+                       strike=float(strike or 0), option_type=option_type,
+                       ltp=float(q.get("ltp") or real_ltp), bid=float(q.get("bid") or 0),
+                       ask=float(q.get("ask") or 0), oi=float(q.get("oi") or 0),
+                       lot=real_lot_size or 1)
+            ok_g, why_g = passes_guardrails(qc, float(t.get("entry_price") or 0) or float(real_ltp))
+            if not ok_g:
+                logger.warning("🔴 GUARDRAIL REJECT %s: %s "
+                               "(bid %.2f ask %.2f OI %.0f)",
+                               contract["tradingsymbol"], why_g, qc.bid, qc.ask, qc.oi)
+                self._notify(f"🔴 REJECT {contract['tradingsymbol']}: {why_g}")
+                continue
+
+            payload = build_limit_buy(qc, quantity, ask=qc.ask or None,
+                                      product=product_type)
+            logger.info("📤 LIMIT BUY %s qty=%d @ %.2f (ask %.2f + %.2f, OI %.0f, spread %.2f%%)",
+                        payload["tradingsymbol"], quantity, payload["price"],
+                        payload["reference_ask"], _S.LIMIT_BUY_BUFFER, qc.oi,
+                        (qc.ask - qc.bid) / qc.ask * 100 if qc.ask else 99.0)
+
+            if DRY_RUN:
+                result = {"success": True, "order_id": "DRY_RUN",
+                          "status": "DRY_RUN", "filled_qty": quantity,
+                          "avg_price": payload["price"], "reject_reason": None}
+            else:
+                with self._lock:
+                    if self._dup_lock is None:
+                        self._dup_lock = DuplicateLock()
+                outcome = place_with_watchdog(self.broker, payload, self._dup_lock)
+                result = {"success": outcome.placed and outcome.filled_qty > 0,
+                          "order_id": outcome.order_id,
+                          "status": outcome.status,
+                          "filled_qty": outcome.filled_qty,
+                          "avg_price": outcome.avg_price,
+                          "reject_reason": None if outcome.placed else outcome.reason}
+                if outcome.status == "CANCELLED_UNFILLED":
+                    logger.warning("⏱️ %s unfilled %.0fs → auto-cancelled (filled %d)",
+                                   contract["tradingsymbol"],
+                                   outcome.cancelled_after_s, outcome.filled_qty)
 
             if result.get("success"):
                 # Step 7: Check order STATUS — rejected to nahi?

@@ -25,7 +25,8 @@ from typing import Callable
 
 import pandas as pd
 
-from broker.ws_v2 import EXCHANGE_TYPE, MODE_QUOTE, SmartStreamV2
+from broker.ws_v2 import (EXCHANGE_TYPE, MODE_QUOTE, MODE_SNAP_QUOTE,
+                          SmartStreamV2)
 from data.tick_bars import TickBarAggregator, exchange_ts_to_ist
 
 logger = logging.getLogger("tiger_brain.automation.ws_zone_pipe")
@@ -66,6 +67,9 @@ class WSZonePipe:
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._timer: threading.Thread | None = None
+        # Option contract quotes for execution guardrails (bid/ask/OI).
+        self._quote_tokens: dict = {}       # token → (exchange, symbol)
+        self._quotes: dict = {}             # token → {ltp,bid,ask,oi,at}
 
     # ------------------------------------------------------------------
     def _load_master(self):
@@ -129,8 +133,17 @@ class WSZonePipe:
 
     # ------------------------------------------------------------------
     def on_tick(self, tick: dict):
-        """WS callback — halka: sirf 1m bar banana aur zone engine ko dena."""
+        """WS callback — halka: 1m bar banana, zone engine ko dena, aur
+        (agar token option contract ka hai) execution quote cache karna."""
         token = tick.get("token")
+        if token in self._quote_tokens:
+            self._quotes[token] = {
+                "ltp": float(tick.get("ltp") or 0),
+                "bid": float(tick.get("best_bid") or 0),
+                "ask": float(tick.get("best_ask") or 0),
+                "oi": float(tick.get("oi") or 0),
+                "at": time.time(),
+            }
         sym = self.token_to_symbol.get(token)
         ltp = float(tick.get("ltp") or 0)
         if sym is None or ltp <= 0:
@@ -171,6 +184,29 @@ class WSZonePipe:
                 logger.error("Zone pipe flush error: %s", exc)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # option quotes (execution guardrails)
+    # ------------------------------------------------------------------
+    def register_option_quote(self, exchange: str, token: str, symbol: str) -> None:
+        """Signal aaya contract — uska SNAP_QUOTE feed ready karo."""
+        with self._lock:
+            self._quote_tokens[str(token)] = (exchange, symbol)
+        if self.stream is not None:
+            self.stream.subscribe([(EXCHANGE_TYPE[exchange], str(token))],
+                                 mode=MODE_SNAP_QUOTE)
+
+    def quote(self, token: str, wait_s: float = 3.0) -> dict | None:
+        """Token ka bid/ask/OI wait karke do (max wait_s)."""
+        import time as _t
+        key = str(token)
+        end = _t.time() + wait_s
+        while _t.time() < end:
+            q = self._quotes.get(key)
+            if q and q.get("ask", 0) > 0:
+                return q
+            _t.sleep(0.1)
+        return self._quotes.get(key)
+
     def allow_scan(self, symbol: str) -> bool:
         return self.zone.allow_scan(symbol)
 
