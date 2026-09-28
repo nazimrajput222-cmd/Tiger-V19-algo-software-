@@ -26,7 +26,18 @@ def test_score_matrix_locked():
     from config import settings as S
     assert S.SEGMENT_RULES["NSE"] == {"SIGNAL": 70.0, "WATCH": 55.0}
     assert S.SEGMENT_RULES["MCX"] == {"SIGNAL": 60.0, "WATCH": 55.0}
+
+
+def test_mcx_underlyings_default_is_three_roots(monkeypatch):
+    """Default = GOLDM/SILVERM/CRUDEOIL. Env override allowed hai, isliye
+    env clear karke reload karna padta hai (dotenv .env se value inject karta
+    hai, jo test ko pollute karta tha)."""
+    import importlib
+    import config.settings as S
+    monkeypatch.delenv("TIGER_MCX_ROOTS", raising=False)
+    importlib.reload(S)
     assert set(S.MCX_UNDERLYINGS) == {"GOLDM", "SILVERM", "CRUDEOIL"}
+    assert "NATURALGAS" not in S.MCX_UNDERLYINGS
 
 
 def test_no_market_order_ever():
