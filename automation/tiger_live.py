@@ -76,6 +76,10 @@ class TigerLiveRunner:
         self.capital_start: float = 0.0
         self.capital_after_entry: float = 0.0
         self.capital_after_exit: float = 0.0
+        # Telegram controller (SIGNAL / WATCH / DRY_RUN / errors)
+        from automation.telegram_notifier import TelegramNotifier
+        self.notifier = TelegramNotifier()
+        self.notifier.start()
         # WS V2 data plane — zone engine ko 1m/15m bars deta hai
         self.zone_engine = LiveZoneEngine(
             max_bars_15m=WS_V2["MAX_BARS_15M"], max_bars_1m=WS_V2["MAX_BARS_1M"],
@@ -217,6 +221,7 @@ class TigerLiveRunner:
                 broker=self.broker)
             trades = combined.get("trades", [])
             totals = combined.get("totals", {})
+            self._notify_zone_signals(trades)
 
             # === LIVE EXECUTION BRIDGE ===
             # Backtest ne signals generate kiye. Ab unhe REAL orders mein
@@ -689,6 +694,49 @@ class TigerLiveRunner:
         except Exception as exc:
             logger.error("Delivery snapshot error: %s", exc)
 
+    # --- Telegram signal bridge (zone engine scores) ---
+    WATCH_SCORE_ENV = "TIGER_WATCH_SCORE_MIN"
+
+    def _notify_zone_signals(self, trades: list[dict]) -> None:
+        """Zone engine ke aaj ke trades → Telegram.
+
+        SIGNAL: score >= MIN_SCORE_TO_ENTER (engine ka apna entry threshold)
+        WATCH : score >= WATCH_SCORE (default 55) par sirf alert, order nahi
+        """
+        try:
+            import os
+            from backtest.run_tiger_brain_backtest import MIN_SCORE_TO_ENTER
+            try:
+                watch_min = float(os.getenv(self.WATCH_SCORE_ENV, "55"))
+            except ValueError:
+                watch_min = 55.0
+            today = datetime.now().date()
+            for t in trades or []:
+                ts = t.get("entry_ts")
+                if ts is None:
+                    continue
+                try:
+                    d = ts.date() if hasattr(ts, "date") else pd.Timestamp(ts).date()
+                except Exception:
+                    continue
+                if d != today:
+                    continue
+                score = float(t.get("score") or t.get("setup_score") or 0)
+                if score < watch_min:
+                    continue
+                side = "CALL" if t.get("option_type") == "CE" else "PUT"
+                sym = t.get("symbol", "?")
+                strike = t.get("strike", "?")
+                msg = (f"{'🚨 TIGER SIGNAL' if score >= MIN_SCORE_TO_ENTER else '👀 TIGER WATCH'}\n"
+                       f"{sym} {side} {strike}\n"
+                       f"Score: {score:.1f} | premium ₹{float(t.get('entry_price') or 0):.2f}"
+                       f" | qty {t.get('quantity', '?')}")
+                logger.info(msg.replace("\n", " | "))
+                if self.notifier is not None:
+                    self.notifier.notify(msg)
+        except Exception as exc:
+            logger.warning("Telegram zone-signal bridge fail: %s", exc)
+
     def _ws_broker(self):
         """Stream ke liye logged-in broker (session reuse)."""
         if getattr(self, "broker", None) is None:
@@ -895,6 +943,11 @@ class TigerLiveRunner:
                 self.zone_pipe.stop()
             except Exception as exc:
                 logger.warning("Zone pipe stop warning: %s", exc)
+        if getattr(self, "notifier", None) is not None:
+            try:
+                self.notifier.stop()
+            except Exception as exc:
+                logger.warning("Notifier stop warning: %s", exc)
         if self.scheduler:
             self.scheduler.shutdown()
         self._running = False
