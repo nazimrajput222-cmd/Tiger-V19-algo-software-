@@ -80,3 +80,19 @@ def test_empty_until_enough_bars():
     e.on_bar_1m("X", bar(datetime(2026, 9, 28, 9, 15), 1, 2, 0.5, 1.5))
     dm, dm1 = e.data_maps()
     assert dm == {} and dm1 == {}
+
+
+def test_seeded_tz_aware_history_does_not_break_with_live_naive_bars():
+    """Angel REST index tz-aware hai, live bars naive IST — dono mix na hon."""
+    import pandas as pd
+    e = LiveZoneEngine()
+    idx = pd.date_range("2026-09-28 09:15", periods=30, freq="15min", tz="Asia/Kolkata")
+    df15 = pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                         "volume": 100.0}, index=idx)
+    e.seed("NIFTY", None, df15)
+    base = datetime(2026, 9, 28, 9, 15)
+    for i in range(20):
+        e.on_bar_1m("NIFTY", bar(base + timedelta(minutes=i), 10, 12, 9, 11, 100))
+    dm, dm1 = e.data_maps()      # must not raise
+    assert dm["NIFTY"].index.tz is None
+    assert dm["NIFTY"].index.is_monotonic_increasing

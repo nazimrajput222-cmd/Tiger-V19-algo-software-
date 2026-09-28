@@ -127,20 +127,28 @@ class LiveZoneEngine:
             out[sym] = df[BAR_COLS].tail(cap).copy()
         return out
 
+    @staticmethod
+    def _naive_ist(ts) -> pd.Timestamp:
+        """Angel REST index tz-aware hota hai; live bars naive IST. Sab normalize."""
+        t = pd.Timestamp(ts)
+        if t.tzinfo is not None:
+            t = t.tz_convert("Asia/Kolkata").tz_localize(None)
+        return t
+
     def seed(self, symbol: str, df_1m: pd.DataFrame, df_15m: pd.DataFrame | None = None):
         """Warm-up: historical candles (Angel REST) ko live bars ke aage jodo."""
         with self._lock:
             if df_1m is not None and not df_1m.empty:
                 store = self._bars_1m[symbol]
                 for ts, row in df_1m.iterrows():
-                    store[pd.Timestamp(ts)] = {c: float(row[c]) for c in BAR_COLS}
+                    store[self._naive_ist(ts)] = {c: float(row[c]) for c in BAR_COLS}
                 for k in sorted(store)[: max(0, len(store) - self.max_bars_1m)]:
                     store.pop(k, None)
             if df_15m is not None and not df_15m.empty:
                 store = self._bars_15m[symbol]
                 for ts, row in df_15m.iterrows():
-                    store[pd.Timestamp(ts)] = [{
-                        "timestamp": pd.Timestamp(ts),
+                    store[self._naive_ist(ts)] = [{
+                        "timestamp": self._naive_ist(ts),
                         "open": float(row["open"]), "high": float(row["high"]),
                         "low": float(row["low"]), "close": float(row["close"]),
                         "volume": float(row.get("volume", 0) or 0),
