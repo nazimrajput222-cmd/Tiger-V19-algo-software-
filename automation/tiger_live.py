@@ -460,6 +460,12 @@ class TigerLiveRunner:
 
             # Step 6: Place REAL BUY order (Tiger always buys options)
             # Delivery = CARRYFORWARD (overnight), Intraday = INTRADAY
+            # --- STRICT PATH: options premium par sirf BUY. Equity/future ya
+            # SELL kabhi nahi. Delivery alag block neeche handle hota hai.
+            if str(t.get("option_type", "")).upper() not in ("CE", "PE"):
+                logger.warning("⛔ Non-option contract skipped: %s (%s)", symbol,
+                               t.get("option_type"))
+                continue
             transaction_type = "BUY"
             product_type = "CARRYFORWARD" if is_delivery else "INTRADAY"
             result = self.broker.place_option_order(
@@ -698,18 +704,14 @@ class TigerLiveRunner:
     WATCH_SCORE_ENV = "TIGER_WATCH_SCORE_MIN"
 
     def _notify_zone_signals(self, trades: list[dict]) -> None:
-        """Zone engine ke aaj ke trades → Telegram.
+        """Zone engine ke aaj ke trades → Telegram (segment-aware).
 
-        SIGNAL: score >= MIN_SCORE_TO_ENTER (engine ka apna entry threshold)
-        WATCH : score >= WATCH_SCORE (default 55) par sirf alert, order nahi
+        SIGNAL: score >= segment SIGNAL floor (NSE 70 / MCX 60) — order bhi jaayega
+        WATCH : score >= segment WATCH floor (55) par sirf alert, koi order nahi
         """
         try:
-            import os
-            from backtest.run_tiger_brain_backtest import MIN_SCORE_TO_ENTER
-            try:
-                watch_min = float(os.getenv(self.WATCH_SCORE_ENV, "55"))
-            except ValueError:
-                watch_min = 55.0
+            from config.thresholds import segment_rule
+            from universe.fno_universe import segment_of
             today = datetime.now().date()
             for t in trades or []:
                 ts = t.get("entry_ts")
@@ -721,15 +723,20 @@ class TigerLiveRunner:
                     continue
                 if d != today:
                     continue
+                sym = t.get("symbol", "?")
+                seg = segment_of(sym)
                 score = float(t.get("score") or t.get("setup_score") or 0)
+                watch_min = segment_rule(seg, "WATCH")
+                signal_min = segment_rule(seg, "SIGNAL")
                 if score < watch_min:
                     continue
                 side = "CALL" if t.get("option_type") == "CE" else "PUT"
-                sym = t.get("symbol", "?")
-                strike = t.get("strike", "?")
-                msg = (f"{'🚨 TIGER SIGNAL' if score >= MIN_SCORE_TO_ENTER else '👀 TIGER WATCH'}\n"
-                       f"{sym} {side} {strike}\n"
-                       f"Score: {score:.1f} | premium ₹{float(t.get('entry_price') or 0):.2f}"
+                is_signal = score >= signal_min
+                mkt = "MCX" if seg == "commodity" else "NSE"
+                msg = (f"{'🚨 TIGER SIGNAL' if is_signal else '👀 TIGER WATCH'}\n"
+                       f"{sym} {mkt} {side} {t.get('strike', '?')}\n"
+                       f"Score: {score:.1f} (signal ≥{signal_min:g}, watch ≥{watch_min:g})"
+                       f"\nPremium ₹{float(t.get('entry_price') or 0):.2f}"
                        f" | qty {t.get('quantity', '?')}")
                 logger.info(msg.replace("\n", " | "))
                 if self.notifier is not None:

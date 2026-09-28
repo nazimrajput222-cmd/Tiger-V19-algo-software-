@@ -1263,11 +1263,15 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
             # === ROCKET GATE: only true rockets pass (50/100 filter) ===
             if not is_rocket:
                 continue
-            if score < ROCKET_MIN_SCORE:
-                continue
 
-            # === MINIMUM SCORE CHECK (legacy floor, now superseded by rocket gate) ===
-            if score < MIN_SCORE_TO_ENTER:
+            # === SEGMENT-AWARE SCORE FLOORS (NSE 70 / MCX 60) ===
+            # Pehle dono global thay: ROCKET_MIN_SCORE=72, MIN_SCORE_TO_ENTER=75.
+            # Ab signal floor per segment hai. Structural gate (is_rocket:
+            # >=3 confluence + >=1 fuel) JYAADON as-is hai — score floor ke
+            # neeche aane se weak structure admit nahi hota.
+            from config.thresholds import segment_rule
+            seg_signal_floor = segment_rule(seg, "SIGNAL")
+            if score < seg_signal_floor:
                 continue
 
             # --- Strike selection ---

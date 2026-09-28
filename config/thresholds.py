@@ -408,6 +408,27 @@ WS_V2 = {
     "WARMUP_PAUSE_SEC": 0.4,
     "MCX_ALLOWED_ROOTS": tuple(
         r.strip().upper() for r in
-        _os.getenv("TIGER_MCX_ROOTS", "GOLDM,SILVERM,CRUDEOIL,NATURALGAS").split(",")
+        _os.getenv("TIGER_MCX_ROOTS", "GOLDM,SILVERM,CRUDEOIL").split(",")
         if r.strip()),
 }
+
+
+# ============================================================
+# SEGMENT ENTRY RULES — NSE vs MCX (user-locked)
+# ============================================================
+# score >= SIGNAL → real LIMIT BUY order (options premium, BUY only)
+# WATCH <= score < SIGNAL → Telegram alert only, NO order
+SEGMENT_RULES = {
+    "NSE": {"SIGNAL": _envf("TIGER_NSE_SIGNAL_SCORE", 70.0),
+            "WATCH": _envf("TIGER_NSE_WATCH_SCORE", 55.0)},
+    "MCX": {"SIGNAL": _envf("TIGER_MCX_SIGNAL_SCORE", 60.0),
+            "WATCH": _envf("TIGER_MCX_WATCH_SCORE", 55.0)},
+}
+# "commodity" segment == MCX. index/stock == NSE.
+SEGMENT_OF_KIND = {"index": "NSE", "stock": "NSE", "commodity": "MCX"}
+
+
+def segment_rule(seg: str, key: str) -> float:
+    """seg ('index'/'stock'/'commodity') + 'SIGNAL'|'WATCH' → threshold."""
+    kind = SEGMENT_OF_KIND.get(seg, "NSE")
+    return float(SEGMENT_RULES[kind][key])
