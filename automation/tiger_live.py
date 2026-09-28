@@ -155,6 +155,14 @@ class TigerLiveRunner:
                 self.broker, days_15m=30, days_1m=7, use_scan_universe=True)
             logger.info("✅ Data fetched: %d symbols (15m), %d symbols (1m). Failed: %d",
                         len(self.data_map), len(self.data_map_1m), len(failed))
+            # WS V2: ye history zone engine ko warm-up ke liye chahiye. Bina
+            # iske live bars se zone detect hi nahi hoga (40-bar lookback =
+            # lagbhag 10 ghante), isliye pehle din koi signal nahi aata.
+            if WS_V2["ENABLED"] and self.zone_engine is not None:
+                for sym, df15 in self.data_map.items():
+                    self.zone_engine.seed(sym, self.data_map_1m.get(sym), df15)
+                logger.info("✅ Zone engine warm-up: %d symbols seeded (15m+1m).",
+                            self.zone_engine.stats()["symbols_15m"])
         except Exception as exc:
             logger.error("❌ Data fetch fail: %s", exc)
             self.data_map, self.data_map_1m = {}, {}
