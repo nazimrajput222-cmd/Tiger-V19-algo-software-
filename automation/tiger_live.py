@@ -37,7 +37,7 @@ from automation.scheduler import (
     is_mcx_hours,
 )
 from data.loader import resolve_option_contract
-from config.thresholds import AUTOMATION, MARKET_CATEGORIES, WS_V2
+from config.thresholds import AUTOMATION, DRY_RUN, MARKET_CATEGORIES, WS_V2
 from automation.live_zone_engine import LiveZoneEngine, run_zone_engine
 
 
@@ -224,6 +224,23 @@ class TigerLiveRunner:
         except Exception as exc:
             logger.error("Intraday scan error: %s", exc)
 
+    def _dry_run_log(self, kind: str, trades: list[dict]) -> None:
+        """DRY_RUN: signal log karo, order mat bhejo. Telegram + journal."""
+        try:
+            for t in trades:
+                sym = t.get("symbol", "?")
+                strike = t.get("strike", "?")
+                side = "CALL" if t.get("option_type") == "CE" else "PUT"
+                score = t.get("score") or t.get("setup_score") or "?"
+                msg = (f"🧪 DRY_RUN {kind}: {side} {sym} {strike} "
+                       f"score={score} — ORDER NAHI BHEJA")
+                logger.info(msg)
+                notifier = getattr(self, "notifier", None)
+                if notifier is not None:
+                    notifier.notify(msg)
+        except Exception as exc:
+            logger.warning("DRY_RUN log fail: %s", exc)
+
     def _place_live_orders(self, trades: list[dict]) -> int:
         """Backtest signals → REAL Angel One orders.
 
@@ -242,6 +259,15 @@ class TigerLiveRunner:
             int: kitne real orders successfully placed + accepted
         """
         if not trades or self.broker is None:
+            return 0
+
+        # ---- SAFETY GATE: DRY_RUN pe KABHI bhi order nahi jaata ----
+        # Original 84724d6 mein DRY_RUN sirf config mein define tha, koi order
+        # path use nahi karta tha (sirf stage5_execution.py). Isliye dry-run
+        # mode mein bhi asli order chala jata tha. Yeh gate strategy ko
+        # bilkul nahi chhedta — sirf place karna rokta hai.
+        if DRY_RUN:
+            self._dry_run_log("ENTRY", trades)
             return 0
 
         today = datetime.now().date()
@@ -510,6 +536,10 @@ class TigerLiveRunner:
             int: kitne positions successfully closed
         """
         if not exit_trades or self.broker is None:
+            return 0
+
+        if DRY_RUN:
+            self._dry_run_log("EXIT", exit_trades)
             return 0
 
         # Real broker positions fetch (kya actually hold kar rahe hain)
