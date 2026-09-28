@@ -367,6 +367,67 @@ ANGEL_EXCHANGE = {
 
 
 # ============================================================
+# GAMMA-BLAST BONUS LAYER  (scorer only — NEVER a gate)
+# ============================================================
+# Teen conditions saath me true hon to +15. False ho to kuch nahi hota —
+# trade REJECT nahi hota, bas bonus nahi milta. Isliye ye layer kabhi
+# execution freeze nahi karega.
+GAMMA_BLAST_BONUS = 15
+GAMMA_BLAST_DELTA_VELOCITY_MIN = 0.35
+GAMMA_BLAST_VOL_SMA_MULT = 3.0
+GAMMA_BLAST_VOL_SMA_PERIOD = 20
+
+
+def gamma_blast_bonus(df_1m, i_1m, spot, vwap_val) -> tuple:
+    """
+    (bonus_points, detail_list)
+
+    Criteria (all simultaneous):
+      a) delta expansion velocity > 0.35 (positive momentum)
+      b) volume > 3x 20-period SMA
+      c) spot above VWAP (breakout)
+    """
+    details = []
+    if df_1m is None or i_1m is None or i_1m < 1 or spot is None or spot <= 0:
+        return 0, ["gamma-blast: data nahi (skip)"]
+
+    cur_delta = volume_delta(df_1m.iloc[i_1m])
+    prev_delta = volume_delta(df_1m.iloc[i_1m - 1])
+    if prev_delta > 0:
+        # classic expansion velocity: kitna tez badha pichhle tick/bar se
+        velocity = (cur_delta - prev_delta) / abs(prev_delta)
+    else:
+        # pichhla delta zero/near-zero (flat candle) → ratio undefined hai.
+        # Robust fallback: current delta ko pichhle N bars ke average |delta|
+        # se normalise karo (repo ke delta_spike_confirms jaisa scale-invariant
+        # spike ratio). Zero nahi maana jaata — genuinely strong delta ko
+        # unfairly suppress nahi karna.
+        prior = [abs(volume_delta(df_1m.iloc[j]))
+                 for j in range(max(0, i_1m - 5), i_1m)]
+        base = (sum(prior) / len(prior)) if prior else 0.0
+        velocity = (cur_delta / base) if base > 0 else 0.0
+
+    window = df_1m["volume"].iloc[max(0, i_1m - GAMMA_BLAST_VOL_SMA_PERIOD):i_1m]
+    sma = float(window.mean()) if len(window) else 0.0
+    cur_vol = float(df_1m["volume"].iloc[i_1m] or 0)
+
+    a_ok = velocity > GAMMA_BLAST_DELTA_VELOCITY_MIN
+    b_ok = sma > 0 and cur_vol > GAMMA_BLAST_VOL_SMA_MULT * sma
+    c_ok = bool(vwap_val) and spot > float(vwap_val)
+
+    details.append(f"gamma-blast: vel {velocity:.2f}"
+                   f"{' OK' if a_ok else ' no'}"
+                   f" | vol {cur_vol:,.0f} vs {GAMMA_BLAST_VOL_SMA_MULT:g}x SMA {sma:,.0f}"
+                   f"{' OK' if b_ok else ' no'}"
+                   f" | spot {spot:.2f} vs vwap {float(vwap_val or 0):.2f}"
+                   f"{' OK' if c_ok else ' no'}")
+    if a_ok and b_ok and c_ok:
+        return GAMMA_BLAST_BONUS, details
+    return 0, details
+
+
+
+# ============================================================
 # BLACK-SCHOLES OPTION PRICING + GREEKS
 # ============================================================
 def _norm_cdf(x: float) -> float:
@@ -1259,6 +1320,18 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
             except Exception:
                 confluence_count = 0
                 is_rocket = False
+
+            # === GAMMA-BLAST BONUS LAYER (scorer only) ===
+            # +15 jab delta-velocity + volume-spike + VWAP-cross saath me hon.
+            # FAIL hone par KOI rejection nahi — sirf bonus 0. Yeh gate kabhi
+            # nahi bana, isliye legitimate trades block nahi honge.
+            try:
+                gb_points, gb_details = gamma_blast_bonus(
+                    df_1m, i_1m, cur_price, vwap_val if 'vwap_val' in dir() else 0)
+                score += gb_points
+                score_details.extend(gb_details)
+            except Exception as exc:
+                score_details.append(f"gamma-blast skip: {exc}")
 
             # === ROCKET GATE: only true rockets pass (50/100 filter) ===
             if not is_rocket:
