@@ -963,7 +963,8 @@ def volume_confirmed(df_1m, i_1m, zone_type) -> tuple[bool, str]:
 # ============================================================
 # SCORING ENTRY ENGINE — ALL 5 BRAINS AS SCORERS
 # ============================================================
-def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
+def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val,
+                               adjusted_score_threshold=None):
     """15m-only entry path for symbols without 1m data (indexes, illiquid).
 
     Uses 15m bar for zone touch + momentum confirmation instead of 1m sniper.
@@ -1062,7 +1063,9 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
         is_rocket = confluence_count >= 3
         if not is_rocket:
             continue
-        if score < ROCKET_MIN_SCORE - 6:  # relaxed by 6 for 15m-only
+        # Use adjusted threshold if provided (force-hunt), else ROCKET_MIN_SCORE
+        effective_threshold = adjusted_score_threshold if adjusted_score_threshold is not None else (ROCKET_MIN_SCORE - 6)
+        if score < effective_threshold:
             continue
 
         # Strike selection
@@ -1092,7 +1095,8 @@ def find_tiger_brain_entry_15m(df_15m, i_15m, seg, is_expiry, symbol, vix_val):
 
 
 def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
-                           broker, pcr_cache, vix_val):
+                           broker, pcr_cache, vix_val,
+                           adjusted_score_threshold=None):
     """
     Tiger Brain unified entry — scoring system, not gating.
 
@@ -1260,15 +1264,22 @@ def find_tiger_brain_entry(df_15m, i_15m, df_1m, seg, is_expiry, symbol,
                 confluence_count = 0
                 is_rocket = False
 
-            # === ROCKET GATE: only true rockets pass (50/100 filter) ===
+            # === ROCKET GATE: only true rockets pass (confluence + score) ===
             if not is_rocket:
                 continue
-            if score < ROCKET_MIN_SCORE:
+            # Use adjusted threshold if provided (force-hunt relaxes the gate),
+            # else default ROCKET_MIN_SCORE
+            effective_threshold = adjusted_score_threshold if adjusted_score_threshold is not None else ROCKET_MIN_SCORE
+            if score < effective_threshold:
                 continue
 
-            # === MINIMUM SCORE CHECK (legacy floor, now superseded by rocket gate) ===
-            if score < MIN_SCORE_TO_ENTER:
-                continue
+            # === MINIMUM SCORE CHECK (legacy floor) ===
+            # When force-hunt is active, the adjusted threshold already lowered
+            # the bar — don't apply the legacy floor on top.
+            # adjusted_score_threshold is None when called without session brain.
+            if adjusted_score_threshold is None:
+                if score < MIN_SCORE_TO_ENTER:
+                    continue
 
             # --- Strike selection ---
             # ITM for momentum trades (sweep/spike/supply-explosive) — higher delta =
@@ -1544,6 +1555,49 @@ def fetch_angel_data(broker, days_15m=365, days_1m=90, use_scan_universe=False):
 
 
 # ============================================================
+# BRAIN 7 HELPERS — segment naming + segment mandate
+# ============================================================
+def _to_session_segment(seg: str) -> str:
+    """Map universe segment_of() values to session-brain segment names.
+
+    universe segment_of() returns: 'stock' | 'index' | 'commodity'
+    session brain expects: 'nse' (stock+index) | 'mcx' (commodity)
+    """
+    if seg == "commodity":
+        return "mcx"
+    return "nse"
+
+
+def check_segment_mandate(
+    seg: str, sim_date, daily_seg_counts: dict, daily_hunt: HuntStatus | None
+) -> dict:
+    """2-trades-per-segment/day permanent mandate.
+
+    Tiger guarantees at least 2 trades in EACH segment every trading day:
+    - equity (NSE: stocks + index) — minimum 2
+    - commodity (MCX) — minimum 2
+    """
+    seg_trades = daily_seg_counts.get(sim_date, {}).get(seg, 0)
+    min_required = 2
+    if seg_trades < min_required:
+        return {
+            "allowed": False,
+            "message": (
+                f"SEGMENT MANDATE: {seg} has {seg_trades}/{min_required} trades today — "
+                f"need {min_required - seg_trades} more (force-hunt required)"
+            ),
+            "trades_taken": seg_trades,
+            "min_required": min_required,
+        }
+    return {
+        "allowed": True,
+        "message": f"Segment mandate met: {seg} {seg_trades}/{min_required}",
+        "trades_taken": seg_trades,
+        "min_required": min_required,
+    }
+
+
+# ============================================================
 # MAIN BACKTEST ENGINE
 # ============================================================
 def run_tiger_brain_backtest(data_map, start_capital=150000.0,
@@ -1726,10 +1780,30 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
 
                 expiry = use_sniper and is_expiry_day(sym, ts)
 
+                # === BRAIN 7: Session-based score threshold + force hunt ===
+                # Compute the adjusted (possibly lowered) score threshold for this
+                # symbol's segment. The segment naming from segment_of() is
+                # "stock"/"commodity"/"index" — map to "nse"/"mcx" for the
+                # session brain which expects those names.
+                ts_ist = _to_ist(ts)
+                ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
+                sess_segment = _to_session_segment(seg)
+                force_hunt = False
+                adjusted_score_threshold = ROCKET_MIN_SCORE
+                if use_session_brain and daily_hunt is not None:
+                    session_thresh = get_session_score_threshold(ts_time, sess_segment)
+                    if session_thresh < 999:
+                        adjusted_score_threshold = min(adjusted_score_threshold, session_thresh)
+                    force_hunt, fh_thresh, fh_reason = should_force_hunt(
+                        ts_time, daily_hunt, sess_segment)
+                    if force_hunt:
+                        adjusted_score_threshold = min(adjusted_score_threshold, fh_thresh)
+
                 if use_sniper and data_map_1m and sym in data_map_1m:
                     setup = find_tiger_brain_entry(
                         df_sym, idx, data_map_1m[sym], seg, expiry, sym,
-                        broker, pcr_cache, vix_val)
+                        broker, pcr_cache, vix_val,
+                        adjusted_score_threshold=adjusted_score_threshold)
                     if setup is None:
                         filter_stats["rejected_low_score_or_volume"] += 1
                         continue
@@ -1738,7 +1812,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                     # No 1m data for this symbol — try 15m-only entry
                     # (indexes often lack 1m data from Angel One)
                     setup = find_tiger_brain_entry_15m(
-                        df_sym, idx, seg, expiry, sym, vix_val)
+                        df_sym, idx, seg, expiry, sym, vix_val,
+                        adjusted_score_threshold=adjusted_score_threshold)
                     if setup is None:
                         continue
                     brain_log["entry_scored"] += 1
@@ -1748,6 +1823,8 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 day_candidates.append({
                     "symbol": sym, "setup": setup, "df_sym": df_sym,
                     "idx": idx, "ts": ts, "seg": seg, "expiry": expiry,
+                    "force_hunt": force_hunt,
+                    "adjusted_score_threshold": adjusted_score_threshold,
                 })
 
             day_candidates.sort(key=lambda c: c["setup"]["setup_score"], reverse=True)
@@ -1759,6 +1836,19 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 seg = cand["seg"]
                 if not counter.can_trade(sym)["allowed"]:
                     continue
+                # === 2-TRADES-PER-SEGMENT/DAY PERMANENT MANDATE (Brain 4) ===
+                # Tiger guarantees at least 2 trades per segment (equity + commodity)
+                # every trading day. Below the minimum → only force-hunt entries allowed.
+                mand = check_segment_mandate(seg, sim_date, daily_seg_counts, daily_hunt)
+                if not mand["allowed"]:
+                    if cand.get("force_hunt"):
+                        logger.info(
+                            "SEGMENT MANDATE override — %s has %d/%d trades, "
+                            "but force_hunt active → allowing entry",
+                            seg, mand["trades_taken"], mand["min_required"])
+                    else:
+                        filter_stats["rejected_segment_mandate"] += 1
+                        continue
                 if daily_seg_counts[sim_date][seg] >= 10:
                     continue
 
@@ -1770,20 +1860,12 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 df_so_far = df_sym.loc[:ts]
                 is_call = setup["direction"] == "BUY"
 
-                # === BRAIN 7: Session-based score threshold + force hunt ===
-                ts_ist = _to_ist(ts)
-                ts_time = ts_ist.time() if hasattr(ts_ist, 'time') else ts.time()
-                force_hunt = False
-                adjusted_score_threshold = ROCKET_MIN_SCORE
-                if use_session_brain and daily_hunt is not None:
-                    session_thresh = get_session_score_threshold(ts_time, seg)
-                    if session_thresh < 999:
-                        adjusted_score_threshold = min(adjusted_score_threshold, session_thresh)
-                    force_hunt, fh_thresh, _ = should_force_hunt(ts_time, daily_hunt, seg)
-                    if force_hunt:
-                        adjusted_score_threshold = min(adjusted_score_threshold, fh_thresh)
+                # force_hunt and adjusted_score_threshold were computed during candidate
+                # generation (per-symbol, based on session + hunt status) and stored in cand
+                force_hunt = cand.get("force_hunt", False)
+                adjusted_score_threshold = cand.get("adjusted_score_threshold", ROCKET_MIN_SCORE)
 
-                # === Strike selection + IV computation (must be before Brain 6) ===
+                # === STRIKE SELECTION + IV computation (must be before Brain 6) ===
                 strike_kind = setup.get("strike_kind", "ATM")
                 delta_in_reason = "delta" in setup.get("delta_reason", "")
                 if (expiry and delta_in_reason) or strike_kind == "ITM":
@@ -1945,6 +2027,14 @@ def run_tiger_brain_backtest(data_map, start_capital=150000.0,
                 # === BRAIN 7: Record hunt trade ===
                 if daily_hunt is not None:
                     daily_hunt.record_trade(seg)
+                    if force_hunt:
+                        logger.info(
+                            "MANDATORY HUNT — %s | Entry taken: %s %s strike=%d "
+                            "(%s, score=%.0f, threshold relaxed to %.0f)",
+                            sim_date, sym,
+                            "CE" if is_call else "PE", strike,
+                            setup.get("strategy", "?"),
+                            setup["setup_score"], adjusted_score_threshold)
                 open_positions.append(pos)
                 if verbose:
                     logger.warning(

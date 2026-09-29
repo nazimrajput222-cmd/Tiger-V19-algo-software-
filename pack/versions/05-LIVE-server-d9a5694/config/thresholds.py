@@ -321,6 +321,13 @@ BRAIN4 = {
     "MAX_TRADES_PER_DAY_COMMODITY": 5,
     "MAX_TRADES_PER_DAY_COMMODITY_MIN": 5,
     "MAX_TRADES_PER_DAY_COMMODITY_MAX": 10,
+    # === 2-TRADES-PER-SEGMENT/DAY PERMANENT MANDATE (V19) ===
+    # Tiger guarantees a minimum number of trades per segment every trading day.
+    # Even if quality gates would block every candidate, force-hunt kicks in
+    # to fulfill this minimum. This is the "BINA SHIKAR LIYE GHAR NAHI" rule
+    # applied per-segment rather than per-day-total.
+    "MIN_TRADES_PER_SEGMENT_PER_DAY": 2,
+    "MIN_TRADES_PER_SEGMENT_COMMODITY": 2,
     # Dynamic position sizing: full Angel One capital available for trading.
     "MAX_CAPITAL_PER_TRADE_PCT": 100.0,
     # Full capital deployable across trades (Angel One balance = 100% trading money).

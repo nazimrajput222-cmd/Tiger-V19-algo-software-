@@ -274,6 +274,24 @@ def get_session_preferred_strike(t: time, segment: str = "nse") -> str:
 # ============================================================
 # "BINA SHIKAR LIYE GHAR NAHI" — Tiger's hunting guarantee
 # ============================================================
+# 2-TRADES-PER-SEGMENT/DAY PERMANENT MANDATE (V19)
+# Tiger guarantees a minimum number of trades per segment every trading day,
+# even if quality gates would normally block every candidate.
+try:
+    from config.thresholds import BRAIN4
+    MIN_TRADES_PER_SEGMENT_PER_DAY = BRAIN4.get(
+        "MIN_TRADES_PER_SEGMENT_PER_DAY", 2)
+except (ImportError, Exception):
+    MIN_TRADES_PER_SEGMENT_PER_DAY = 2  # safe fallback
+
+
+def _normalize_segment(seg: str) -> str:
+    """Normalize segment names: 'stock'/'index' → 'nse', 'commodity' → 'mcx'."""
+    if seg in ("commodity", "mcx"):
+        return "mcx"
+    return "nse"
+
+
 @dataclass
 class HuntStatus:
     """Tracks Tiger's daily hunt progress — ensures Tiger never goes home empty."""
@@ -284,6 +302,9 @@ class HuntStatus:
     nse_profit: float = 0.0
     mcx_profit: float = 0.0
     last_session_checked: str = ""
+    # 2-trades-per-segment mandate tracking
+    nse_segment_trades: int = 0
+    mcx_segment_trades: int = 0
 
     @property
     def is_empty_hunt(self) -> bool:
@@ -296,20 +317,44 @@ class HuntStatus:
         return self.total_trades < 3
 
     def record_trade(self, segment: str, pnl: float = 0.0) -> None:
-        """Record a completed trade."""
-        if segment == "commodity":
+        """Record a completed trade.
+
+        segment can be 'stock'/'index'/'commodity' (from segment_of()) or
+        'nse'/'mcx' (from session brain).
+        """
+        norm = _normalize_segment(segment)
+        if norm == "mcx":
             self.mcx_trades += 1
             self.mcx_profit += pnl
+            self.mcx_segment_trades += 1
         else:
             self.nse_trades += 1
             self.nse_profit += pnl
+            self.nse_segment_trades += 1
         self.total_trades += 1
+
+    def segment_trades(self, segment: str) -> int:
+        """Get trade count for a segment (normalized)."""
+        norm = _normalize_segment(segment)
+        if norm == "mcx":
+            return self.mcx_segment_trades
+        return self.nse_segment_trades
+
+    @property
+    def needs_segment_mandate(self) -> dict:
+        """Check if any segment hasn't met the 2-trades/day mandate yet."""
+        return {
+            "nse": self.nse_segment_trades < MIN_TRADES_PER_SEGMENT_PER_DAY,
+            "mcx": self.mcx_segment_trades < MIN_TRADES_PER_SEGMENT_PER_DAY,
+        }
 
     def summary(self) -> str:
         return (
             f"NSE: {self.nse_trades} trades (₹{self.nse_profit:+,.0f}) | "
             f"MCX: {self.mcx_trades} trades (₹{self.mcx_profit:+,.0f}) | "
-            f"Total: {self.total_trades}"
+            f"Total: {self.total_trades} | "
+            f"Mandate: NSE {self.nse_segment_trades}/{MIN_TRADES_PER_SEGMENT_PER_DAY}, "
+            f"MCX {self.mcx_segment_trades}/{MIN_TRADES_PER_SEGMENT_PER_DAY}"
         )
 
 
@@ -325,33 +370,66 @@ def should_force_hunt(
       - If NSE session ending (14:30+) and < 3 NSE trades → lower threshold
       - If MCX night rush (20:00+) and < 3 total trades → lower threshold hard
       - If MCX near close (22:00+) and 0 trades → force at least 1 trade
+      - PERMANENT MANDATE: if < 2 trades per segment → force hunt to fulfill mandate
 
     Args:
         t: current IST time
         hunt: HuntStatus for today
-        segment: "nse" or "mcx"
+        segment: "nse"/"mcx" or "stock"/"index"/"commodity" (auto-normalized)
 
     Returns:
         (force_hunt, adjusted_threshold, reason)
     """
+    norm_seg = _normalize_segment(segment)
+    seg_trades = hunt.segment_trades(norm_seg)
+
+    # === PERMANENT MANDATE: 2-trades-per-segment/day ===
+    # If this segment hasn't met its minimum yet, force-hunt regardless of time.
+    if seg_trades < MIN_TRADES_PER_SEGMENT_PER_DAY:
+        lowered = 72.0 - (seg_trades * 2)  # relax harder the fewer trades we have
+        logger.info(
+            "MANDATORY HUNT — %s | %s segment mandate: %d/%d trades "
+            "→ threshold lowered to %.0f",
+            hunt.date, norm_seg.upper(), seg_trades,
+            MIN_TRADES_PER_SEGMENT_PER_DAY, lowered)
+        return (True, lowered,
+                f"force_hunt: {norm_seg.upper()} segment mandate "
+                f"({seg_trades}/{MIN_TRADES_PER_SEGMENT_PER_DAY})")
+
     # NSE power hour with few trades → moderate relaxation
-    if segment == "nse" and time(14, 30) <= t < time(15, 15):
+    if norm_seg == "nse" and time(14, 30) <= t < time(15, 15):
         if hunt.nse_trades < 2:
+            logger.info(
+                "MANDATORY HUNT — %s | NSE closing soon, only %d NSE trades "
+                "→ threshold lowered to %.0f",
+                hunt.date, hunt.nse_trades, 72.0)
             return (True, 72.0, f"force_hunt: NSE closing soon, only {hunt.nse_trades} NSE trades")
 
     # MCX night rush with few trades → aggressive relaxation
-    if segment == "mcx" and time(20, 0) <= t < time(22, 0):
+    if norm_seg == "mcx" and time(20, 0) <= t < time(22, 0):
         if hunt.total_trades < 3:
+            logger.info(
+                "MANDATORY HUNT — %s | night rush, only %d total trades "
+                "→ threshold lowered to %.0f — HUNT!",
+                hunt.date, hunt.total_trades, 70.0)
             return (True, 70.0, f"force_hunt: night rush, only {hunt.total_trades} total trades — HUNT!")
 
     # MCX near close with 0 trades → force minimum 1 trade
-    if segment == "mcx" and time(22, 0) <= t < time(23, 0):
+    if norm_seg == "mcx" and time(22, 0) <= t < time(23, 0):
         if hunt.total_trades == 0:
+            logger.info(
+                "MANDATORY HUNT — %s | ZERO trades today — Tiger MUST hunt "
+                "before close! → threshold lowered to %.0f",
+                hunt.date, 65.0)
             return (True, 65.0, "force_hunt: ZERO trades today — Tiger MUST hunt before close!")
 
     # MCX near close with very few trades → still try
-    if segment == "mcx" and time(22, 30) <= t < time(23, 0):
+    if norm_seg == "mcx" and time(22, 30) <= t < time(23, 0):
         if hunt.total_trades < 2:
+            logger.info(
+                "MANDATORY HUNT — %s | only %d trades — last chance! "
+                "→ threshold lowered to %.0f",
+                hunt.date, hunt.total_trades, 68.0)
             return (True, 68.0, f"force_hunt: only {hunt.total_trades} trades — last chance!")
 
     return (False, 0.0, "")

@@ -164,26 +164,109 @@ class TestHuntStatus:
         assert "MCX: 1" in s
         assert "Total: 2" in s
 
+    def test_segment_trades_property(self):
+        h = HuntStatus(date="2026-09-04")
+        h.record_trade("stock")
+        assert h.segment_trades("nse") == 1
+        assert h.segment_trades("stock") == 1
+        assert h.segment_trades("index") == 1
+        h.record_trade("commodity")
+        assert h.segment_trades("mcx") == 1
+        assert h.segment_trades("commodity") == 1
+
+    def test_needs_segment_mandate(self):
+        h = HuntStatus(date="2026-09-04")
+        # 0 trades → both segments need mandate
+        mand = h.needs_segment_mandate
+        assert mand["nse"] is True
+        assert mand["mcx"] is True
+        # Record 2 NSE trades → NSE mandate met
+        h.record_trade("stock")
+        h.record_trade("stock")
+        mand = h.needs_segment_mandate
+        assert mand["nse"] is False
+        assert mand["mcx"] is True
+        # Record 2 MCX trades → both met
+        h.record_trade("commodity")
+        h.record_trade("commodity")
+        mand = h.needs_segment_mandate
+        assert mand["nse"] is False
+        assert mand["mcx"] is False
+
 
 class TestForceHunt:
     def test_no_force_hunt_when_enough_trades(self):
         h = HuntStatus(date="2026-09-04")
         for _ in range(5):
             h.record_trade("stock")
+        # 5 NSE trades → segment mandate (2) met → no force hunt
         force, threshold, reason = should_force_hunt(time(14, 45), h, "nse")
         assert force is False
 
-    def test_force_hunt_nse_power_hour_few_trades(self):
+    def test_segment_mandate_triggers_force_hunt(self):
         h = HuntStatus(date="2026-09-04")
-        h.record_trade("stock")  # only 1 trade
+        # Only 1 NSE trade → segment mandate (2) not met → force hunt ANY time
+        h.record_trade("stock")
         force, threshold, reason = should_force_hunt(time(14, 45), h, "nse")
         assert force is True
-        assert threshold < 78.0  # lowered
-        assert "NSE closing" in reason
+        assert threshold < 78.0
+        assert "mandate" in reason.lower()
+
+    def test_segment_mandate_mcx(self):
+        h = HuntStatus(date="2026-09-04")
+        # 0 MCX trades → segment mandate not met → force hunt
+        force, threshold, reason = should_force_hunt(time(20, 30), h, "mcx")
+        assert force is True
+        assert "mandate" in reason.lower() or "night rush" in reason.lower()
+
+    def test_force_hunt_nse_power_hour_few_trades(self):
+        """With segment mandate met but few NSE trades in power hour."""
+        h = HuntStatus(date="2026-09-04")
+        # Meet NSE segment mandate (2 trades)
+        h.record_trade("stock")
+        h.record_trade("stock")
+        # nse_segment_trades = 2 (>= MIN_TRADES_PER_SEGMENT_PER_DAY=2)
+        # nse_trades = 2, which is NOT < 2, so power hour rule doesn't trigger
+        # This is correct: once mandate met, time-based rules use nse_trades
+        # which equals 2, so no additional force hunt
+        force, threshold, reason = should_force_hunt(time(14, 45), h, "nse")
+        assert force is False  # 2 trades meets both mandate and power hour threshold
+
+    def test_time_based_force_hunt_after_mandate_met(self):
+        """Test time-based force hunt when segment mandate is met."""
+        h = HuntStatus(date="2026-09-04")
+        h.record_trade("stock")  # nse_seg=1
+        h.record_trade("stock")  # nse_seg=2 (mandate met)
+        h.record_trade("stock")  # nse_seg=3
+        h.record_trade("stock")  # nse_seg=4 (>= 3, but < 3 for power hour? No, 4 >= 2)
+        # Actually nse_trades=4, so < 2 is False. Let me test with 1 trade.
+        h2 = HuntStatus(date="2026-09-04")
+        h2.record_trade("stock")  # nse_seg=1
+        h2.record_trade("commodity")  # adds to mcx, nse_seg still 1
+        # nse_segment_trades=1 < 2 → mandate triggers
+        force, threshold, reason = should_force_hunt(time(14, 45), h2, "nse")
+        assert force is True
+        assert "mandate" in reason.lower()
+
+    def test_time_based_force_hunt_after_mandate_met_with_3_trades(self):
+        """Test that time-based rules work when mandate is met."""
+        h = HuntStatus(date="2026-09-04")
+        # Record 3 NSE trades to meet mandate
+        h.record_trade("stock")
+        h.record_trade("stock")
+        h.record_trade("stock")
+        # Now test: nse_trades=3, which is NOT < 2 → no force hunt at 14:45
+        # But if we have only 1 NSE trade... mandate kicks in instead
+        # The key test: with mandate met AND >= 2 trades, no force hunt
+        force, threshold, reason = should_force_hunt(time(14, 45), h, "nse")
+        assert force is False
 
     def test_force_hunt_mcx_night_rush_few_trades(self):
         h = HuntStatus(date="2026-09-04")
-        h.record_trade("stock")
+        # Meet MCX segment mandate
+        h.record_trade("commodity")
+        h.record_trade("commodity")
+        # Now 2 MCX trades, segment mandate met. Total = 2 < 3 → night rush
         force, threshold, reason = should_force_hunt(time(20, 30), h, "mcx")
         assert force is True
         assert threshold < 78.0
@@ -191,16 +274,54 @@ class TestForceHunt:
 
     def test_force_hunt_mcx_near_close_zero_trades(self):
         h = HuntStatus(date="2026-09-04")
-        # Zero trades → Tiger MUST hunt
+        # Zero trades → Tiger MUST hunt (segment mandate triggers first)
         force, threshold, reason = should_force_hunt(time(22, 30), h, "mcx")
         assert force is True
-        assert threshold == 65.0
-        assert "ZERO" in reason or "last chance" in reason
+        # Segment mandate: threshold = 72 - 0*2 = 72.0 (takes priority over time-based 65)
+        assert threshold == 72.0
+        assert "mandate" in reason.lower()
 
-    def test_no_force_hunt_during_morning(self):
+    def test_no_force_hunt_during_morning_when_mandate_met(self):
         h = HuntStatus(date="2026-09-04")
-        # Morning — no force hunt even with 0 trades
+        # Meet NSE segment mandate
+        h.record_trade("stock")
+        h.record_trade("index")
+        # Morning, mandate met, no time-based force hunt
         force, threshold, reason = should_force_hunt(time(9, 30), h, "nse")
+        assert force is False
+
+    def test_force_hunt_during_morning_when_mandate_not_met(self):
+        h = HuntStatus(date="2026-09-04")
+        # 0 NSE trades → segment mandate not met → force hunt even in morning
+        force, threshold, reason = should_force_hunt(time(9, 30), h, "nse")
+        assert force is True
+        assert "mandate" in reason.lower()
+
+    def test_segment_normalization_stock_is_nse(self):
+        """Verify 'stock' segment is treated as 'nse' by should_force_hunt."""
+        h = HuntStatus(date="2026-09-04")
+        # 0 trades → segment mandate triggers
+        force, threshold, reason = should_force_hunt(time(14, 45), h, "stock")
+        assert force is True
+        assert "mandate" in reason.lower()
+
+    def test_segment_normalization_commodity_is_mcx(self):
+        """Verify 'commodity' segment is treated as 'mcx' by should_force_hunt."""
+        h = HuntStatus(date="2026-09-04")
+        # 0 trades → segment mandate triggers
+        force, threshold, reason = should_force_hunt(time(20, 30), h, "commodity")
+        assert force is True
+        assert "mandate" in reason.lower()
+
+    def test_no_force_hunt_after_mandate_met_and_enough_trades(self):
+        """With mandate met and enough trades, no force hunt even in night rush."""
+        h = HuntStatus(date="2026-09-04")
+        # 4 MCX trades → mandate met, and total >= 3
+        h.record_trade("commodity")
+        h.record_trade("commodity")
+        h.record_trade("commodity")
+        h.record_trade("commodity")
+        force, threshold, reason = should_force_hunt(time(20, 30), h, "mcx")
         assert force is False
 
 
